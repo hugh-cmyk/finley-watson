@@ -1,0 +1,1372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bike Runner — Finley Watson</title>
+    <style>
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+        }
+
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #f5f5f7;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: #1d1d1f;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            user-select: none;
+        }
+
+        .container {
+            text-align: center;
+            padding: 2rem;
+        }
+
+        h1 {
+            font-size: clamp(2rem, 5vw, 3rem);
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            line-height: 1.1;
+        }
+
+        .back {
+            display: inline-block;
+            margin-top: 0.6rem;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #86868b;
+            text-decoration: none;
+            transition: color 0.15s ease;
+        }
+
+        .back:hover {
+            color: #1d1d1f;
+        }
+
+        .game-wrapper {
+            margin-top: 1.5rem;
+            display: inline-block;
+        }
+
+        .info-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.4rem;
+            padding: 0 0.25rem;
+        }
+
+        .info-left, .info-right {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .score {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #1d1d1f;
+        }
+
+        .high-score {
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #86868b;
+        }
+
+        .level-text {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #48484a;
+        }
+
+        .level-progress {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: #86868b;
+        }
+
+        .attempts-text {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: #ff3b30;
+        }
+
+        canvas {
+            display: block;
+            border-radius: 14px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04);
+            cursor: pointer;
+        }
+
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: rgba(245, 245, 247, 0.85);
+            border-radius: 14px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.25s ease;
+        }
+
+        .overlay.visible {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .overlay-title {
+            font-size: 1.6rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            color: #1d1d1f;
+        }
+
+        .overlay-sub {
+            margin-top: 0.35rem;
+            font-size: 1rem;
+            color: #6e6e73;
+            font-weight: 500;
+        }
+
+        .overlay-detail {
+            margin-top: 0.2rem;
+            font-size: 0.85rem;
+            color: #aeaeb2;
+            font-weight: 400;
+        }
+
+        .overlay-hint {
+            margin-top: 0.25rem;
+            font-size: 0.82rem;
+            color: #aeaeb2;
+            font-weight: 400;
+            line-height: 1.5;
+        }
+
+        .btn {
+            margin-top: 1rem;
+            padding: 0.6rem 1.6rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            font-family: inherit;
+            color: #fff;
+            background: #1d1d1f;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s ease, transform 0.1s ease;
+        }
+
+        .btn:hover {
+            background: #333;
+        }
+
+        .btn:active {
+            transform: scale(0.97);
+        }
+
+        .btn-row {
+            display: flex;
+            gap: 0.6rem;
+            margin-top: 1rem;
+        }
+
+        .btn-secondary {
+            padding: 0.6rem 1.6rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            font-family: inherit;
+            color: #1d1d1f;
+            background: rgba(0,0,0,0.06);
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s ease, transform 0.1s ease;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(0,0,0,0.10);
+        }
+
+        .btn-secondary:active {
+            transform: scale(0.97);
+        }
+
+        .canvas-container {
+            position: relative;
+            display: inline-block;
+        }
+
+        .hint {
+            margin-top: 0.75rem;
+            font-size: 0.8rem;
+            color: #aeaeb2;
+            font-weight: 400;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Bike Runner</h1>
+        <a class="back" href="index.html">&larr; Back to games</a>
+
+        <div class="game-wrapper">
+            <div class="info-bar">
+                <div class="info-left">
+                    <span class="score" id="score">Score: 0</span>
+                    <span class="level-text" id="level-text">Level 1</span>
+                    <span class="level-progress" id="level-progress">0 / 12</span>
+                </div>
+                <div class="info-right">
+                    <span class="attempts-text hidden" id="attempts-text"></span>
+                    <span class="high-score" id="high-score">Best: 0</span>
+                </div>
+            </div>
+            <div class="canvas-container">
+                <canvas id="game" width="700" height="320"></canvas>
+
+                <div class="overlay visible" id="start-overlay">
+                    <span class="overlay-title">Bike Runner</span>
+                    <span class="overlay-sub">Dodge the obstacles!</span>
+                    <span class="overlay-hint">Click to jump &middot; Drag mouse down to crouch<br>Space / Up = jump &middot; Down arrow = crouch</span>
+                    <button class="btn" id="start-btn">Play</button>
+                </div>
+
+                <div class="overlay" id="crash-overlay">
+                    <span class="overlay-title">You crashed!</span>
+                    <span class="overlay-sub" id="crash-level"></span>
+                    <span class="overlay-detail" id="crash-attempts"></span>
+                    <div class="btn-row" id="crash-buttons"></div>
+                </div>
+
+                <div class="overlay" id="gameover-overlay">
+                    <span class="overlay-title">Game Over</span>
+                    <span class="overlay-sub" id="final-score">Score: 0</span>
+                    <span class="overlay-detail">No attempts remaining — back to Level 1</span>
+                    <button class="btn" id="restart-btn">Start Over</button>
+                </div>
+            </div>
+            <p class="hint">Click to jump &middot; Drag mouse down to crouch</p>
+        </div>
+    </div>
+
+    <script>
+    "use strict";
+
+    /* ================================================================
+       DOM
+       ================================================================ */
+    const canvas = document.getElementById("game");
+    const ctx    = canvas.getContext("2d");
+    const W      = canvas.width;
+    const H      = canvas.height;
+
+    const startOverlay    = document.getElementById("start-overlay");
+    const crashOverlay    = document.getElementById("crash-overlay");
+    const gameoverOverlay = document.getElementById("gameover-overlay");
+    const scoreEl         = document.getElementById("score");
+    const highScoreEl     = document.getElementById("high-score");
+    const finalScoreEl    = document.getElementById("final-score");
+    const levelTextEl     = document.getElementById("level-text");
+    const levelProgressEl = document.getElementById("level-progress");
+    const attemptsTextEl  = document.getElementById("attempts-text");
+    const crashLevelEl    = document.getElementById("crash-level");
+    const crashAttemptsEl = document.getElementById("crash-attempts");
+    const crashButtonsEl  = document.getElementById("crash-buttons");
+    const startBtn        = document.getElementById("start-btn");
+    const restartBtn      = document.getElementById("restart-btn");
+
+    /* ================================================================
+       LEVEL CONFIG
+       ================================================================ */
+    const CLEARS_PER_LEVEL  = 12;
+    const LEVEL_UP_PAUSE_MS = 1200;
+    const ATTEMPTS_PER_LEVEL = 3;        // retries per level (total tries = this number)
+
+    /*  Each level defines:
+        speed, spawnMin, spawnMax — difficulty
+        types — which obstacle kinds can appear
+        overheadPct, lizardPct, pooPct — spawn weights (remainder = ground)
+        Levels beyond the array repeat the last entry with bumps.
+    */
+    const LEVELS = [
+        { // Level 1 — basics
+            speed: 3.2, spawnMin: 80, spawnMax: 170,
+            types: ["ground", "overhead"],
+            overheadPct: 0.25, lizardPct: 0, pooPct: 0,
+        },
+        { // Level 2 — flying lizards
+            speed: 4.0, spawnMin: 65, spawnMax: 145,
+            types: ["ground", "overhead", "lizard"],
+            overheadPct: 0.22, lizardPct: 0.20, pooPct: 0,
+        },
+        { // Level 3 — poo piles
+            speed: 4.8, spawnMin: 55, spawnMax: 125,
+            types: ["ground", "overhead", "lizard", "poo"],
+            overheadPct: 0.20, lizardPct: 0.18, pooPct: 0.15,
+        },
+        { // Level 4+ template
+            speed: 5.6, spawnMin: 45, spawnMax: 110,
+            types: ["ground", "overhead", "lizard", "poo"],
+            overheadPct: 0.18, lizardPct: 0.20, pooPct: 0.18,
+        },
+    ];
+    const EXTRA_LEVEL_SPEED_BUMP = 0.4;
+
+    /* ================================================================
+       TUNING
+       ================================================================ */
+    const TERRAIN_BASE_Y   = H - 70;
+    const TERRAIN_AMP_1    = 18;
+    const TERRAIN_FREQ_1   = 0.008;
+    const TERRAIN_AMP_2    = 8;
+    const TERRAIN_FREQ_2   = 0.025;
+
+    const RIDER_X      = 100;
+    const GRAVITY      = 0.6;
+    const JUMP_FORCE        = -11.5;
+    const DOUBLE_JUMP_FORCE = -10;          // second jump velocity (slightly weaker)
+    const STAND_HEIGHT = 40;
+    const DUCK_HEIGHT  = 18;
+    const DUCK_LERP    = 0.25;
+    const MAX_SPEED    = 12;
+    const SPEED_RAMP   = 0.0003;
+
+    const OVERHEAD_Y_ABOVE = 72;
+    const LIZARD_FLY_Y       = 62;            // base height above ground
+    const LIZARD_FLY_Y_VARY  = 5;            // random height variation (±px)
+    const LIZARD_BOB_AMP     = 5;            // vertical bob amplitude
+    const LIZARD_BOB_SPEED   = 0.08;
+    const POO_W = 24;
+    const POO_H = 22;
+
+    const MOUSE_DRAG_THRESHOLD = 18;
+
+    /* Invincibility potion */
+    const POTION_W          = 18;
+    const POTION_H          = 26;
+    const POTION_SPAWN_MIN  = 320;       // min frames between spawns
+    const POTION_SPAWN_MAX  = 600;       // max frames between spawns
+    const INVINCIBLE_DURATION = 300;     // frames (~5 seconds at 60fps)
+
+    const COLORS = {
+        sky:          "#e8e8ed",
+        terrainFill:  "#d8d8dc",
+        terrainLine:  "#bcbcc0",
+        terrainUnder: "#cdcdd1",
+        rider:        "#1d1d1f",
+        wheel:        "#48484a",
+        spoke:        "#9a9a9e",
+        // Ground obstacles
+        cone:         "#ff3b30",
+        coneStripe:   "#fff",
+        rock:         "#8e8e93",
+        rockLight:    "#a1a1a6",
+        rockDark:     "#636366",
+        crate:        "#c8935a",
+        crateLight:   "#d9a76a",
+        crateDark:    "#a67740",
+        cratePlank:   "#b8854e",
+        // Overhead obstacles
+        signBoard:    "#ff9500",
+        signPost:     "#8e8e93",
+        signText:     "#fff",
+        branch:       "#6d5232",
+        branchLeaf:   "#34c759",
+        barrier:      "#ff3b30",
+        barrierPole:  "#e5e5ea",
+        // Lizard
+        lizard:       "#34c759",
+        lizardWing:   "#30b855",
+        lizardEye:    "#ff3b30",
+        // Poo
+        poo:          "#8b6914",
+        pooHighlight: "#a07e2a",
+        pooStink:     "#9aab3a",
+        // Potion
+        potionBody:   "#007aff",
+        potionGlow:   "rgba(0, 122, 255, 0.25)",
+        potionCork:   "#c8935a",
+        potionShine:  "rgba(255,255,255,0.5)",
+        invincible:   "rgba(0, 122, 255, 0.18)",
+        // Other
+        cloud:        "#d5d5da",
+        particle:     "#b0b0b5",
+        levelUp:      "#007aff",
+    };
+
+    /* ================================================================
+       STATE
+       ================================================================ */
+    let running = false, paused = false, rafId = null;
+    let score, highScore, speed, frameCount, terrainOffset;
+    let rider, obstacles, nextSpawn, clouds, particles;
+    let level, levelClears, attempts;
+    let levelUpTimer, newObstacleMsg, newObstacleMsgTimer;
+    let levelScoreStart;
+
+    let potions, nextPotionSpawn, invincibleTimer, potionUsedThisLevel;
+
+    let mouseIsDown = false, mouseDownY = 0, mouseCrouching = false;
+    let keyCrouching = false;
+
+    highScore = parseInt(localStorage.getItem("bike-high") || "0", 10);
+    highScoreEl.textContent = "Best: " + highScore;
+
+    /* ================================================================
+       LEVEL HELPERS
+       ================================================================ */
+    function getLevelConfig() {
+        if (level < LEVELS.length) return LEVELS[level];
+        const base = LEVELS[LEVELS.length - 1];
+        const extra = level - (LEVELS.length - 1);
+        return {
+            ...base,
+            speed:    base.speed + extra * EXTRA_LEVEL_SPEED_BUMP,
+            spawnMin: Math.max(30, base.spawnMin - extra * 4),
+            spawnMax: Math.max(60, base.spawnMax - extra * 8),
+        };
+    }
+
+    function levelBaseSpeed() {
+        return Math.min(MAX_SPEED, getLevelConfig().speed);
+    }
+
+    function updateHUD() {
+        scoreEl.textContent = "Score: " + score;
+        levelTextEl.textContent = "Level " + (level + 1);
+        levelProgressEl.textContent = levelClears + " / " + CLEARS_PER_LEVEL;
+
+        if (level > 0) {
+            attemptsTextEl.classList.remove("hidden");
+            attemptsTextEl.textContent = "\u2764 ".repeat(attempts).trim();
+        } else {
+            attemptsTextEl.classList.add("hidden");
+        }
+    }
+
+    function advanceLevel() {
+        level++;
+        levelClears = 0;
+        attempts = ATTEMPTS_PER_LEVEL;
+        levelScoreStart = score;
+        potionUsedThisLevel = false;
+        levelUpTimer = Math.round(LEVEL_UP_PAUSE_MS / 16.67);
+        paused = true;
+
+        const cfg = getLevelConfig();
+        if (level === 1 && cfg.types.includes("lizard")) {
+            newObstacleMsg = "Watch out — Flying Lizards!";
+            newObstacleMsgTimer = levelUpTimer;
+        } else if (level === 2 && cfg.types.includes("poo")) {
+            newObstacleMsg = "Eww — Stinky Poo Piles!";
+            newObstacleMsgTimer = levelUpTimer;
+        } else {
+            newObstacleMsg = "";
+            newObstacleMsgTimer = 0;
+        }
+        updateHUD();
+    }
+
+    function obstaclePassed(ob) {
+        if (ob.counted) return;
+        ob.counted = true;
+        levelClears++;
+        updateHUD();
+        if (levelClears >= CLEARS_PER_LEVEL) advanceLevel();
+    }
+
+    /* ================================================================
+       TERRAIN
+       ================================================================ */
+    function terrainY(worldX) {
+        return TERRAIN_BASE_Y
+            + Math.sin(worldX * TERRAIN_FREQ_1) * TERRAIN_AMP_1
+            + Math.sin(worldX * TERRAIN_FREQ_2 + 1.7) * TERRAIN_AMP_2;
+    }
+    function terrainYScreen(sx) { return terrainY(sx + terrainOffset); }
+    function terrainSlopeScreen(sx) {
+        return (terrainYScreen(sx + 1) - terrainYScreen(sx - 1)) / 2;
+    }
+
+    function drawTerrain() {
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        for (let x = 0; x <= W; x += 3) ctx.lineTo(x, terrainYScreen(x));
+        ctx.lineTo(W, H); ctx.closePath();
+        const grad = ctx.createLinearGradient(0, TERRAIN_BASE_Y - 30, 0, H);
+        grad.addColorStop(0, COLORS.terrainFill);
+        grad.addColorStop(1, COLORS.terrainUnder);
+        ctx.fillStyle = grad; ctx.fill();
+
+        ctx.beginPath();
+        for (let x = 0; x <= W; x += 2) {
+            const y = terrainYScreen(x);
+            x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = COLORS.terrainLine; ctx.lineWidth = 2.5; ctx.stroke();
+    }
+
+    /* ================================================================
+       CLOUDS
+       ================================================================ */
+    function makeClouds() {
+        const a = [];
+        for (let i = 0; i < 6; i++) a.push({ x: Math.random()*W, y: 20+Math.random()*55, r: 14+Math.random()*20, parallax: 0.1+Math.random()*0.2 });
+        return a;
+    }
+    function updateClouds() { for (const c of clouds) { c.x -= speed*c.parallax; if (c.x < -50) c.x = W+50+Math.random()*60; } }
+    function drawClouds() {
+        ctx.fillStyle = COLORS.cloud;
+        for (const c of clouds) {
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, c.r, 0, Math.PI*2);
+            ctx.arc(c.x+c.r*0.8, c.y-c.r*0.15, c.r*0.65, 0, Math.PI*2);
+            ctx.arc(c.x-c.r*0.55, c.y+c.r*0.1, c.r*0.5, 0, Math.PI*2);
+            ctx.fill();
+        }
+    }
+
+    /* ================================================================
+       PARTICLES
+       ================================================================ */
+    function makeParticles() { return []; }
+    function spawnDirtParticle() {
+        const gy = terrainYScreen(RIDER_X);
+        particles.push({ x: RIDER_X-18+Math.random()*6, y: gy-2, vx: -1.5-Math.random()*2, vy: -0.5-Math.random()*2, life: 18+Math.random()*12, r: 1.5+Math.random()*2 });
+    }
+    function spawnStinkParticle(px, py) {
+        particles.push({ x: px+(Math.random()-0.5)*10, y: py-5, vx: (Math.random()-0.5)*0.5, vy: -0.8-Math.random()*1.2, life: 25+Math.random()*15, r: 2+Math.random()*2, stink: true });
+    }
+    function updateParticles() {
+        for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += p.stink ? 0.01 : 0.08; p.life--; }
+        particles = particles.filter(p => p.life > 0);
+    }
+    function drawParticles() {
+        for (const p of particles) {
+            ctx.globalAlpha = Math.min(1, p.life/10) * 0.5;
+            ctx.fillStyle = p.stink ? COLORS.pooStink : COLORS.particle;
+            ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    /* ================================================================
+       RIDER
+       ================================================================ */
+    function makeRider() {
+        const gy = terrainYScreen(RIDER_X);
+        return { groundY: gy, y: gy, vy: 0, jumping: false, jumpCount: 0, duckAmount: 0, wheelAngle: 0 };
+    }
+    function isRiderDucking() { return rider.duckAmount > 0.5; }
+
+    function updateRider() {
+        const wantDuck = (mouseCrouching || keyCrouching) && !rider.jumping;
+        const target = wantDuck ? 1 : 0;
+        rider.duckAmount += (target - rider.duckAmount) * DUCK_LERP;
+        if (Math.abs(rider.duckAmount - target) < 0.01) rider.duckAmount = target;
+        rider.groundY = terrainYScreen(RIDER_X);
+        if (rider.jumping) {
+            rider.vy += GRAVITY; rider.y += rider.vy;
+            if (rider.y >= rider.groundY) { rider.y = rider.groundY; rider.vy = 0; rider.jumping = false; rider.jumpCount = 0; }
+        } else { rider.y = rider.groundY; }
+        rider.wheelAngle += speed * 0.07;
+        if (!rider.jumping && frameCount % 3 === 0) spawnDirtParticle();
+    }
+
+    function drawRider() {
+        const duck = rider.duckAmount, baseY = rider.y;
+        const slope = rider.jumping ? 0 : terrainSlopeScreen(RIDER_X);
+        ctx.save();
+        ctx.translate(RIDER_X, baseY);
+        ctx.rotate(Math.atan(slope) * 0.6);
+
+        const wheelR = 14, rearX = -16, frontX = 16, wheelCY = -wheelR;
+        ctx.strokeStyle = COLORS.wheel; ctx.lineWidth = 2.5;
+        for (const wx of [rearX, frontX]) {
+            ctx.beginPath(); ctx.arc(wx, wheelCY, wheelR, 0, Math.PI*2); ctx.stroke();
+            ctx.strokeStyle = COLORS.spoke; ctx.lineWidth = 1;
+            for (let i = 0; i < 4; i++) {
+                const a = rider.wheelAngle + (Math.PI/2)*i;
+                ctx.beginPath(); ctx.moveTo(wx, wheelCY);
+                ctx.lineTo(wx+Math.cos(a)*wheelR*0.8, wheelCY+Math.sin(a)*wheelR*0.8); ctx.stroke();
+            }
+            ctx.strokeStyle = COLORS.wheel; ctx.lineWidth = 2.5;
+        }
+
+        ctx.strokeStyle = COLORS.rider; ctx.lineWidth = 3; ctx.lineJoin = "round"; ctx.lineCap = "round";
+        const seatY = wheelCY - (22 - duck*12), seatX = -5;
+        const htX = frontX+3, htY = seatY + duck*6 - 2;
+        ctx.beginPath(); ctx.moveTo(seatX, seatY); ctx.lineTo(rearX, wheelCY); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(seatX, seatY); ctx.lineTo(htX, htY); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(htX, htY); ctx.lineTo(frontX, wheelCY); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(htX, htY); ctx.lineTo(htX+5, htY-5+duck*4); ctx.stroke();
+
+        if (duck > 0.4) {
+            const tx = htX-2, ty = htY-3;
+            ctx.beginPath(); ctx.moveTo(seatX, seatY); ctx.lineTo(tx, ty); ctx.stroke();
+            ctx.fillStyle = COLORS.rider;
+            ctx.beginPath(); ctx.arc(tx+1, ty-5, 5, 0, Math.PI*2); ctx.fill();
+        } else {
+            const sx2 = seatX+2, sy2 = seatY-17+duck*8;
+            ctx.beginPath(); ctx.moveTo(seatX, seatY); ctx.lineTo(sx2, sy2); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(sx2, sy2); ctx.lineTo(htX+4, htY-4); ctx.stroke();
+            ctx.fillStyle = COLORS.rider;
+            ctx.beginPath(); ctx.arc(sx2, sy2-7, 6, 0, Math.PI*2); ctx.fill();
+        }
+        ctx.restore();
+    }
+
+    function getRiderHitbox() {
+        const ducking = isRiderDucking(), h = ducking ? DUCK_HEIGHT : STAND_HEIGHT;
+        return {
+            x: RIDER_X - 22,
+            y: rider.y - 28 - h + (ducking ? 8 : 0),
+            w: 44,
+            h: 28 + h - (ducking ? 8 : 0),
+        };
+    }
+
+    /* ================================================================
+       OBSTACLES — definitions, spawn, draw, hitbox
+       ================================================================ */
+
+    /* ── Helpers ── */
+    function vary(base, pct) {
+        return base * (1 + (Math.random() - 0.5) * 2 * pct);
+    }
+
+    /* ── Spawn ── */
+    function spawnObstacle() {
+        const cfg = getLevelConfig();
+        const roll = Math.random();
+        let cum = 0;
+
+        cum += cfg.pooPct;
+        if (roll < cum && cfg.types.includes("poo")) {
+            const s = 0.85 + Math.random() * 0.3;
+            return { x: W+30, kind: "poo", w: POO_W*s, h: POO_H*s, scale: s, counted: false };
+        }
+        cum += cfg.lizardPct;
+        if (roll < cum && cfg.types.includes("lizard")) {
+            const flyY = LIZARD_FLY_Y + (Math.random() - 0.5) * 2 * LIZARD_FLY_Y_VARY;
+            return { x: W+30, kind: "lizard", w: 32, h: 20, flyY, phase: Math.random()*Math.PI*2, counted: false };
+        }
+        cum += cfg.overheadPct;
+        if (roll < cum && cfg.types.includes("overhead")) {
+            const variant = Math.floor(Math.random() * 3);  // 0=sign, 1=branch, 2=barrier
+            return { x: W+30, kind: "overhead", variant, w: vary(54, 0.1), h: vary(18, 0.1), counted: false };
+        }
+
+        // Ground — 0=cone, 1=rock, 2=crate
+        const variant = Math.floor(Math.random() * 3);
+        let w, h;
+        if (variant === 0)      { w = vary(16, 0.15); h = vary(30, 0.12); }  // cone
+        else if (variant === 1) { w = vary(22, 0.2);  h = vary(20, 0.2);  }  // rock
+        else                    { w = vary(24, 0.12); h = vary(26, 0.12); }  // crate
+        return { x: W+30, kind: "ground", variant, w, h, wobblePhase: Math.random()*Math.PI*2, counted: false };
+    }
+
+    function scheduleSpawn() {
+        const cfg = getLevelConfig();
+        nextSpawn = frameCount + cfg.spawnMin + Math.floor(Math.random() * (cfg.spawnMax - cfg.spawnMin));
+    }
+
+    /* ── Draw: ground obstacles ── */
+    function drawGroundObstacle(ob) {
+        const gy = terrainYScreen(ob.x);
+        const cx = ob.x, bw = ob.w, bh = ob.h;
+
+        if (ob.variant === 0) {
+            // Traffic cone
+            const tipY = gy - bh;
+            // Orange body
+            ctx.fillStyle = COLORS.cone;
+            ctx.beginPath();
+            ctx.moveTo(cx, tipY);
+            ctx.lineTo(cx + bw*0.55, gy);
+            ctx.lineTo(cx - bw*0.55, gy);
+            ctx.closePath();
+            ctx.fill();
+            // White stripes
+            ctx.fillStyle = COLORS.coneStripe;
+            ctx.fillRect(cx - bw*0.2, tipY + bh*0.35, bw*0.4, 4);
+            ctx.fillRect(cx - bw*0.35, tipY + bh*0.6, bw*0.7, 3);
+            // Base
+            ctx.fillStyle = "#d44030";
+            ctx.fillRect(cx - bw*0.6, gy - 4, bw*1.2, 4);
+
+        } else if (ob.variant === 1) {
+            // Rock — irregular blob
+            ctx.fillStyle = COLORS.rock;
+            ctx.beginPath();
+            ctx.moveTo(cx - bw*0.5, gy);
+            ctx.lineTo(cx - bw*0.45, gy - bh*0.5);
+            ctx.quadraticCurveTo(cx - bw*0.2, gy - bh*1.05, cx + bw*0.1, gy - bh*0.85);
+            ctx.quadraticCurveTo(cx + bw*0.45, gy - bh*0.7, cx + bw*0.5, gy - bh*0.3);
+            ctx.lineTo(cx + bw*0.45, gy);
+            ctx.closePath();
+            ctx.fill();
+            // Highlight facet
+            ctx.fillStyle = COLORS.rockLight;
+            ctx.beginPath();
+            ctx.moveTo(cx - bw*0.2, gy - bh*0.8);
+            ctx.lineTo(cx + bw*0.1, gy - bh*0.85);
+            ctx.lineTo(cx + bw*0.15, gy - bh*0.5);
+            ctx.lineTo(cx - bw*0.15, gy - bh*0.55);
+            ctx.closePath();
+            ctx.fill();
+            // Dark crack
+            ctx.strokeStyle = COLORS.rockDark;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(cx - bw*0.1, gy - bh*0.7);
+            ctx.lineTo(cx + bw*0.05, gy - bh*0.35);
+            ctx.stroke();
+
+        } else if (ob.variant === 2) {
+            // Wooden crate
+            const x = cx - bw/2, y = gy - bh;
+            ctx.fillStyle = COLORS.crate;
+            ctx.beginPath(); ctx.roundRect(x, y, bw, bh, 2); ctx.fill();
+            // Planks
+            ctx.strokeStyle = COLORS.crateDark;
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(x, y + bh*0.33); ctx.lineTo(x + bw, y + bh*0.33); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x, y + bh*0.66); ctx.lineTo(x + bw, y + bh*0.66); ctx.stroke();
+            // Cross braces
+            ctx.strokeStyle = COLORS.cratePlank;
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(x+2, y+2); ctx.lineTo(x+bw-2, y+bh-2); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x+bw-2, y+2); ctx.lineTo(x+2, y+bh-2); ctx.stroke();
+            // Corner nails
+            ctx.fillStyle = COLORS.crateDark;
+            for (const [nx, ny] of [[x+3,y+3],[x+bw-3,y+3],[x+3,y+bh-3],[x+bw-3,y+bh-3]]) {
+                ctx.beginPath(); ctx.arc(nx, ny, 1.5, 0, Math.PI*2); ctx.fill();
+            }
+
+        }
+    }
+
+    /* ── Draw: overhead obstacles ── */
+    function drawOverheadObstacle(ob) {
+        const gy = terrainYScreen(ob.x);
+        const barY = gy - OVERHEAD_Y_ABOVE;
+        const cx = ob.x, bw = ob.w, bh = ob.h;
+
+        if (ob.variant === 0) {
+            // Hanging sign
+            // Pole
+            ctx.fillStyle = COLORS.signPost;
+            ctx.fillRect(cx + bw/2 - 3, barY + bh, 6, gy - barY - bh);
+            // Sign board
+            ctx.fillStyle = COLORS.signBoard;
+            ctx.beginPath(); ctx.roundRect(cx - bw/2, barY, bw, bh, 4); ctx.fill();
+            // Hanging chains
+            ctx.strokeStyle = COLORS.signPost;
+            ctx.lineWidth = 1.5;
+            const swing = Math.sin(frameCount * 0.04) * 1.5;
+            ctx.beginPath(); ctx.moveTo(cx - bw/4, barY); ctx.lineTo(cx - bw/4 + swing, barY - 8); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(cx + bw/4, barY); ctx.lineTo(cx + bw/4 + swing, barY - 8); ctx.stroke();
+            // Warning text — "DUCK!"
+            ctx.fillStyle = COLORS.signText;
+            ctx.font = "bold 10px -apple-system, sans-serif";
+            ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            ctx.fillText("DUCK!", cx, barY + bh/2);
+            ctx.textAlign = "start";
+
+        } else if (ob.variant === 1) {
+            // Low tree branch
+            // Main branch
+            ctx.strokeStyle = COLORS.branch;
+            ctx.lineWidth = 5;
+            ctx.lineCap = "round";
+            ctx.beginPath();
+            ctx.moveTo(cx + bw/2 + 10, barY - 5);
+            ctx.quadraticCurveTo(cx, barY + bh/2, cx - bw/2, barY + bh*0.4);
+            ctx.stroke();
+            // Trunk going up
+            ctx.lineWidth = 7;
+            ctx.beginPath();
+            ctx.moveTo(cx + bw/2 + 10, barY - 5);
+            ctx.lineTo(cx + bw/2 + 12, barY - 30);
+            ctx.stroke();
+            // Leaves
+            ctx.fillStyle = COLORS.branchLeaf;
+            const leafPositions = [
+                [cx - bw*0.3, barY + bh*0.3, 8],
+                [cx - bw*0.1, barY + bh*0.15, 10],
+                [cx + bw*0.1, barY + bh*0.1, 9],
+                [cx + bw*0.3, barY - 2, 7],
+                [cx - bw*0.4, barY + bh*0.45, 6],
+            ];
+            for (const [lx, ly, lr] of leafPositions) {
+                const sway = Math.sin(frameCount * 0.05 + lx * 0.1) * 1.5;
+                ctx.beginPath(); ctx.arc(lx + sway, ly, lr, 0, Math.PI*2); ctx.fill();
+            }
+
+        } else {
+            // Barrier gate
+            // Poles
+            ctx.fillStyle = COLORS.barrierPole;
+            ctx.fillRect(cx - bw/2, barY, 5, gy - barY);
+            ctx.fillRect(cx + bw/2 - 5, barY, 5, gy - barY);
+            // Crossbar with red/white stripes
+            const stripeCount = 5;
+            const sw = bw / stripeCount;
+            for (let i = 0; i < stripeCount; i++) {
+                ctx.fillStyle = i % 2 === 0 ? COLORS.barrier : "#fff";
+                ctx.fillRect(cx - bw/2 + i*sw, barY, sw, bh);
+            }
+            // Top cap
+            ctx.fillStyle = COLORS.barrier;
+            ctx.beginPath(); ctx.roundRect(cx - bw/2 - 2, barY - 3, bw + 4, 5, 2); ctx.fill();
+        }
+    }
+
+    /* ── Draw: lizard ── */
+    function getLizardY(ob) {
+        const fly = ob.flyY || LIZARD_FLY_Y;
+        return terrainYScreen(ob.x) - fly + Math.sin(ob.phase + frameCount * LIZARD_BOB_SPEED) * LIZARD_BOB_AMP;
+    }
+
+    function drawLizardObstacle(ob) {
+        const cx = ob.x, cy = getLizardY(ob);
+        const wingFlap = Math.sin(frameCount * 0.18) * 8;
+
+        // Shadow on ground
+        const gy = terrainYScreen(ob.x);
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+        ctx.beginPath(); ctx.ellipse(cx, gy - 2, 14, 4, 0, 0, Math.PI*2); ctx.fill();
+
+        // Body
+        ctx.fillStyle = COLORS.lizard;
+        ctx.beginPath(); ctx.ellipse(cx, cy, 16, 8, 0, 0, Math.PI*2); ctx.fill();
+        // Head
+        ctx.beginPath(); ctx.ellipse(cx-14, cy-2, 7, 6, -0.2, 0, Math.PI*2); ctx.fill();
+        // Snout
+        ctx.beginPath(); ctx.ellipse(cx-20, cy-2, 3, 3, 0, 0, Math.PI*2); ctx.fill();
+        // Eye
+        ctx.fillStyle = "#fff";
+        ctx.beginPath(); ctx.arc(cx-17, cy-4, 3.5, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = COLORS.lizardEye;
+        ctx.beginPath(); ctx.arc(cx-18, cy-4, 1.8, 0, Math.PI*2); ctx.fill();
+        // Pupil highlight
+        ctx.fillStyle = "#fff";
+        ctx.beginPath(); ctx.arc(cx-17.5, cy-5, 0.8, 0, Math.PI*2); ctx.fill();
+
+        // Wings
+        ctx.fillStyle = COLORS.lizardWing; ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        ctx.moveTo(cx-4, cy-6);
+        ctx.quadraticCurveTo(cx+4, cy-22+wingFlap, cx+16, cy-8);
+        ctx.lineTo(cx+6, cy-4); ctx.closePath(); ctx.fill();
+        // Wing vein
+        ctx.strokeStyle = COLORS.lizard; ctx.lineWidth = 0.8;
+        ctx.beginPath(); ctx.moveTo(cx, cy-6); ctx.lineTo(cx+8, cy-14+wingFlap*0.5); ctx.stroke();
+
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = COLORS.lizardWing;
+        ctx.beginPath();
+        ctx.moveTo(cx-2, cy+5);
+        ctx.quadraticCurveTo(cx+2, cy+14-wingFlap*0.5, cx+12, cy+6);
+        ctx.lineTo(cx+4, cy+3); ctx.closePath(); ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // Tail
+        ctx.strokeStyle = COLORS.lizard; ctx.lineWidth = 2.5; ctx.lineCap = "round";
+        const tailWag = Math.sin(frameCount * 0.1) * 4;
+        ctx.beginPath();
+        ctx.moveTo(cx+14, cy);
+        ctx.quadraticCurveTo(cx+24, cy+tailWag, cx+32, cy-3+tailWag*0.5);
+        ctx.stroke();
+
+        // Legs
+        ctx.lineWidth = 2;
+        const ls = Math.sin(frameCount * 0.15) * 3;
+        ctx.beginPath(); ctx.moveTo(cx-8, cy+6); ctx.lineTo(cx-12, cy+13+ls); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx-4, cy+6); ctx.lineTo(cx-1, cy+13-ls); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx+6, cy+6); ctx.lineTo(cx+3, cy+13+ls); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx+10, cy+6); ctx.lineTo(cx+14, cy+13-ls); ctx.stroke();
+    }
+
+    /* ── Draw: poo ── */
+    function drawPooObstacle(ob) {
+        const gy = terrainYScreen(ob.x), cx = ob.x, s = ob.scale || 1;
+        if (frameCount % 8 === 0) spawnStinkParticle(cx, gy - ob.h);
+
+        ctx.save();
+        ctx.translate(cx, gy);
+        ctx.scale(s, s);
+
+        // Base
+        ctx.fillStyle = COLORS.poo;
+        ctx.beginPath(); ctx.ellipse(0, -5, 13, 7, 0, 0, Math.PI*2); ctx.fill();
+        // Middle
+        ctx.beginPath(); ctx.ellipse(-1, -13, 10, 6, 0.05, 0, Math.PI*2); ctx.fill();
+        // Top with curl
+        ctx.beginPath();
+        ctx.moveTo(-5, -17);
+        ctx.quadraticCurveTo(-2, -26, 4, -22);
+        ctx.quadraticCurveTo(8, -19, 5, -16);
+        ctx.quadraticCurveTo(1, -14, -5, -17);
+        ctx.fill();
+        // Highlights
+        ctx.fillStyle = COLORS.pooHighlight;
+        ctx.beginPath(); ctx.ellipse(-4, -14, 3, 2, 0.3, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(1, -21, 2, 1.5, 0, 0, Math.PI*2); ctx.fill();
+        // Eyes (playful face)
+        ctx.fillStyle = "#fff";
+        ctx.beginPath(); ctx.arc(-3, -14, 2.5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(4, -14, 2.5, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = "#1d1d1f";
+        ctx.beginPath(); ctx.arc(-3, -14, 1.2, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(4, -14, 1.2, 0, Math.PI*2); ctx.fill();
+
+        ctx.restore();
+
+        // Stink lines (outside scale transform)
+        ctx.strokeStyle = COLORS.pooStink; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.45;
+        const wave = Math.sin(frameCount * 0.06) * 2;
+        for (let i = -1; i <= 1; i++) {
+            const sx = cx + i*7, sy = gy - ob.h - 4;
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.quadraticCurveTo(sx + wave + i*2, sy - 9, sx - wave, sy - 16);
+            ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    /* ── Potions ── */
+    function schedulePotionSpawn() {
+        nextPotionSpawn = frameCount + POTION_SPAWN_MIN + Math.floor(Math.random() * (POTION_SPAWN_MAX - POTION_SPAWN_MIN));
+    }
+
+    function spawnPotion() {
+        potions.push({ x: W + 30, collected: false });
+    }
+
+    function drawPotion(p) {
+        const gy = terrainYScreen(p.x);
+        const cx = p.x, by = gy - POTION_H;
+        const bob = Math.sin(frameCount * 0.06 + p.x * 0.01) * 3;
+        const py = by + bob;
+
+        // Glow
+        ctx.fillStyle = COLORS.potionGlow;
+        ctx.beginPath(); ctx.arc(cx, py + POTION_H * 0.4, 18, 0, Math.PI * 2); ctx.fill();
+
+        // Bottle body (rounded flask)
+        ctx.fillStyle = COLORS.potionBody;
+        ctx.beginPath();
+        ctx.moveTo(cx - 4, py + 4);        // neck left
+        ctx.lineTo(cx - 8, py + 10);       // shoulder left
+        ctx.quadraticCurveTo(cx - 9, py + POTION_H, cx, py + POTION_H); // bottom left
+        ctx.quadraticCurveTo(cx + 9, py + POTION_H, cx + 8, py + 10);  // bottom right
+        ctx.lineTo(cx + 4, py + 4);        // shoulder right
+        ctx.closePath();
+        ctx.fill();
+
+        // Liquid shimmer
+        ctx.fillStyle = "rgba(255,255,255,0.15)";
+        ctx.beginPath();
+        ctx.ellipse(cx, py + POTION_H * 0.6, 5, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Neck
+        ctx.fillStyle = COLORS.potionBody;
+        ctx.fillRect(cx - 3.5, py, 7, 6);
+
+        // Cork
+        ctx.fillStyle = COLORS.potionCork;
+        ctx.beginPath(); ctx.roundRect(cx - 4, py - 3, 8, 5, 2); ctx.fill();
+
+        // Shine
+        ctx.fillStyle = COLORS.potionShine;
+        ctx.beginPath();
+        ctx.moveTo(cx - 5, py + 8);
+        ctx.lineTo(cx - 3, py + 6);
+        ctx.lineTo(cx - 3, py + 14);
+        ctx.lineTo(cx - 5, py + 16);
+        ctx.closePath();
+        ctx.fill();
+
+        // Sparkle
+        const sparkle = Math.sin(frameCount * 0.12) * 0.4 + 0.6;
+        ctx.globalAlpha = sparkle;
+        ctx.fillStyle = "#fff";
+        ctx.beginPath(); ctx.arc(cx + 5, py + 7, 1.5, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx - 2, py + POTION_H - 5, 1, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+
+    function getPotionHitbox(p) {
+        const gy = terrainYScreen(p.x);
+        return { x: p.x - POTION_W / 2, y: gy - POTION_H - 4, w: POTION_W, h: POTION_H + 4 };
+    }
+
+    function activateInvincible() {
+        invincibleTimer = INVINCIBLE_DURATION;
+    }
+
+    function drawObstacle(ob) {
+        switch (ob.kind) {
+            case "ground":   drawGroundObstacle(ob); break;
+            case "overhead": drawOverheadObstacle(ob); break;
+            case "lizard":   drawLizardObstacle(ob); break;
+            case "poo":      drawPooObstacle(ob); break;
+        }
+    }
+
+    /* ── Hitboxes ── */
+    function getObstacleHitbox(ob) {
+        const gy = terrainYScreen(ob.x);
+        switch (ob.kind) {
+            case "ground":
+                return { x: ob.x - ob.w/2 + 2, y: gy - ob.h + 3, w: ob.w - 4, h: ob.h - 3 };
+            case "overhead": {
+                const barY = gy - OVERHEAD_Y_ABOVE;
+                return { x: ob.x - ob.w/2, y: barY, w: ob.w, h: ob.h };
+            }
+            case "lizard": {
+                const cy = getLizardY(ob);
+                return { x: ob.x - 16, y: cy - 10, w: 32, h: 20 };
+            }
+            case "poo":
+                return { x: ob.x - 11, y: gy - ob.h, w: 22, h: ob.h };
+        }
+    }
+
+    function rectsOverlap(a, b) {
+        return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+    }
+
+    /* ================================================================
+       HUD
+       ================================================================ */
+    function drawHUD() {
+        if (levelUpTimer > 0) {
+            const maxT = Math.round(LEVEL_UP_PAUSE_MS / 16.67);
+            const t = levelUpTimer / maxT;
+            const alpha = t > 0.8 ? (1-t)/0.2 : t < 0.2 ? t/0.2 : 1;
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = COLORS.levelUp;
+            ctx.beginPath(); ctx.roundRect(W/2-120, H/2-36, 240, 72, 14); ctx.fill();
+            ctx.fillStyle = "#fff";
+            ctx.font = "700 22px -apple-system, BlinkMacSystemFont, sans-serif";
+            ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            ctx.fillText("Level " + (level+1), W/2, H/2-6);
+            if (newObstacleMsgTimer > 0) {
+                ctx.font = "500 13px -apple-system, BlinkMacSystemFont, sans-serif";
+                ctx.fillText(newObstacleMsg, W/2, H/2+16);
+            }
+            ctx.globalAlpha = 1; ctx.textAlign = "start";
+        }
+
+        // Progress bar
+        const barW = W-40, barH = 3, barX = 20, barY2 = H-12;
+        const fill = Math.min(1, levelClears / CLEARS_PER_LEVEL);
+        ctx.fillStyle = "rgba(0,0,0,0.06)";
+        ctx.beginPath(); ctx.roundRect(barX, barY2, barW, barH, 2); ctx.fill();
+        ctx.fillStyle = COLORS.levelUp; ctx.globalAlpha = 0.6;
+        if (fill > 0) { ctx.beginPath(); ctx.roundRect(barX, barY2, barW*fill, barH, 2); ctx.fill(); }
+        ctx.globalAlpha = 1;
+    }
+
+    /* ================================================================
+       CRASH / RETRY SYSTEM
+       ================================================================ */
+    function showCrashOverlay() {
+        crashLevelEl.textContent = "Level " + (level+1) + " — Score: " + score;
+
+        crashButtonsEl.innerHTML = "";
+
+        if (attempts > 0) {
+            crashAttemptsEl.textContent = attempts + " attempt" + (attempts !== 1 ? "s" : "") + " remaining";
+            const retryBtn = document.createElement("button");
+            retryBtn.className = "btn";
+            retryBtn.textContent = "Retry Level";
+            retryBtn.addEventListener("click", retryLevel);
+            crashButtonsEl.appendChild(retryBtn);
+        } else {
+            crashAttemptsEl.textContent = "No attempts remaining";
+            // Show full game over instead
+            crashOverlay.classList.remove("visible");
+            finalScoreEl.textContent = "Score: " + score;
+            gameoverOverlay.classList.add("visible");
+            return;
+        }
+
+        crashOverlay.classList.add("visible");
+    }
+
+    function retryLevel() {
+        crashOverlay.classList.remove("visible");
+
+        // Reset game state for level retry — keep level, keep attempts, reset clears
+        score = levelScoreStart;
+        levelClears = 0;
+        frameCount = 0;
+        terrainOffset = 0;
+        speed = levelBaseSpeed();
+        rider = makeRider();
+        obstacles = [];
+        potions = [];
+        invincibleTimer = 0;
+        potionUsedThisLevel = false;
+        particles = makeParticles();
+        mouseCrouching = false;
+        keyCrouching = false;
+        paused = false;
+        levelUpTimer = 0;
+        newObstacleMsg = "";
+        newObstacleMsgTimer = 0;
+        updateHUD();
+        scheduleSpawn();
+        schedulePotionSpawn();
+
+        running = true;
+        rafId = requestAnimationFrame(update);
+    }
+
+    /* ================================================================
+       GAME LOOP
+       ================================================================ */
+    function fullReset() {
+        score = 0;
+        level = 0;
+        levelClears = 0;
+        attempts = ATTEMPTS_PER_LEVEL;
+        levelScoreStart = 0;
+        levelUpTimer = 0;
+        newObstacleMsg = "";
+        newObstacleMsgTimer = 0;
+        speed = getLevelConfig().speed;
+        frameCount = 0;
+        terrainOffset = 0;
+        rider = makeRider();
+        obstacles = [];
+        clouds = makeClouds();
+        particles = makeParticles();
+        potions = [];
+        invincibleTimer = 0;
+        potionUsedThisLevel = false;
+        mouseCrouching = false;
+        keyCrouching = false;
+        paused = false;
+        updateHUD();
+        scheduleSpawn();
+        schedulePotionSpawn();
+    }
+
+    function update() {
+        frameCount++;
+
+        if (paused) {
+            levelUpTimer--;
+            if (newObstacleMsgTimer > 0) newObstacleMsgTimer--;
+            if (levelUpTimer <= 0) {
+                paused = false;
+                speed = levelBaseSpeed();
+                scheduleSpawn();
+            }
+            render();
+            rafId = requestAnimationFrame(update);
+            return;
+        }
+
+        speed = Math.min(MAX_SPEED, levelBaseSpeed() + frameCount * SPEED_RAMP);
+        terrainOffset += speed;
+        if (frameCount % 6 === 0) { score++; scoreEl.textContent = "Score: " + score; }
+
+        updateRider();
+        updateClouds();
+        updateParticles();
+
+        for (const ob of obstacles) {
+            ob.x -= speed;
+            if (!ob.counted && ob.x < RIDER_X - 30) obstaclePassed(ob);
+        }
+        obstacles = obstacles.filter(ob => ob.x > -70);
+
+        if (!paused && frameCount >= nextSpawn) { obstacles.push(spawnObstacle()); scheduleSpawn(); }
+
+        // Potions
+        if (!paused && !potionUsedThisLevel && frameCount >= nextPotionSpawn) { spawnPotion(); schedulePotionSpawn(); }
+        for (const p of potions) p.x -= speed;
+        potions = potions.filter(p => p.x > -40 && !p.collected);
+
+        const rHitPotion = getRiderHitbox();
+        for (const p of potions) {
+            if (!p.collected && rectsOverlap(rHitPotion, getPotionHitbox(p))) {
+                p.collected = true;
+                potionUsedThisLevel = true;
+                activateInvincible();
+            }
+        }
+
+        // Invincibility timer
+        if (invincibleTimer > 0) invincibleTimer--;
+
+        if (invincibleTimer <= 0) {
+            const rHit = getRiderHitbox();
+            for (const ob of obstacles) {
+                if (rectsOverlap(rHit, getObstacleHitbox(ob))) return gameOver();
+            }
+        }
+
+        render();
+        rafId = requestAnimationFrame(update);
+    }
+
+    function render() {
+        ctx.fillStyle = COLORS.sky;
+        ctx.fillRect(0, 0, W, H);
+        drawClouds();
+        drawTerrain();
+        for (const ob of obstacles) if (ob.x > RIDER_X) drawObstacle(ob);
+        for (const p of potions) if (!p.collected) drawPotion(p);
+        drawParticles();
+
+        // Invincibility shield glow
+        if (invincibleTimer > 0) {
+            const flash = invincibleTimer < 90 ? (Math.sin(frameCount * 0.4) > 0 ? 1 : 0.1) : 1;
+            const pulse = 0.4 + Math.sin(frameCount * 0.15) * 0.15;
+            const fade = Math.min(1, invincibleTimer / 30) * flash;
+            ctx.globalAlpha = pulse * fade;
+            ctx.fillStyle = COLORS.invincible;
+            ctx.beginPath();
+            ctx.ellipse(RIDER_X, rider.y - 20, 34, 44, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Bright rim
+            ctx.strokeStyle = COLORS.potionBody;
+            ctx.lineWidth = 2;
+            ctx.globalAlpha = 0.35 * fade;
+            ctx.beginPath();
+            ctx.ellipse(RIDER_X, rider.y - 20, 34, 44, 0, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }
+
+        drawRider();
+        for (const ob of obstacles) if (ob.x <= RIDER_X) drawObstacle(ob);
+        drawHUD();
+
+        // Invincibility timer bar
+        if (invincibleTimer > 0) {
+            const pct = invincibleTimer / INVINCIBLE_DURATION;
+            const bw = 80, bh = 5, bx = W - bw - 20, by2 = 14;
+            ctx.fillStyle = "rgba(0,0,0,0.08)";
+            ctx.beginPath(); ctx.roundRect(bx, by2, bw, bh, 3); ctx.fill();
+            ctx.fillStyle = COLORS.potionBody; ctx.globalAlpha = 0.7;
+            ctx.beginPath(); ctx.roundRect(bx, by2, bw * pct, bh, 3); ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = COLORS.potionBody;
+            ctx.font = "600 10px -apple-system, sans-serif";
+            ctx.textAlign = "right";
+            ctx.fillText("SHIELD", bx - 6, by2 + 5);
+            ctx.textAlign = "start";
+        }
+    }
+
+    function renderIdle() {
+        ctx.fillStyle = COLORS.sky;
+        ctx.fillRect(0, 0, W, H);
+        drawClouds(); drawTerrain(); drawRider();
+    }
+
+    /* ================================================================
+       INPUT
+       ================================================================ */
+    canvas.addEventListener("mousedown", e => {
+        e.preventDefault();
+        if (!running || paused) return;
+        mouseIsDown = true; mouseDownY = e.clientY; mouseCrouching = false;
+    });
+    window.addEventListener("mousemove", e => {
+        if (!running || !mouseIsDown || paused) return;
+        mouseCrouching = (e.clientY - mouseDownY) > MOUSE_DRAG_THRESHOLD;
+    });
+    window.addEventListener("mouseup", e => {
+        if (!running) return;
+        if (mouseIsDown && !mouseCrouching && !paused) doJump();
+        mouseIsDown = false; mouseCrouching = false;
+    });
+    canvas.addEventListener("contextmenu", e => e.preventDefault());
+
+    document.addEventListener("keydown", e => {
+        if (!running || paused) return;
+        if (e.key === " " || e.key === "ArrowUp") { e.preventDefault(); doJump(); }
+        if (e.key === "ArrowDown") { e.preventDefault(); keyCrouching = true; }
+    });
+    document.addEventListener("keyup", e => { if (e.key === "ArrowDown") keyCrouching = false; });
+
+    function doJump() {
+        if (rider.jumpCount < 2) {
+            rider.jumping = true;
+            rider.vy = rider.jumpCount === 0 ? JUMP_FORCE : DOUBLE_JUMP_FORCE;
+            rider.jumpCount++;
+            mouseCrouching = false; keyCrouching = false; rider.duckAmount = 0;
+        }
+    }
+
+    /* ================================================================
+       START / STOP
+       ================================================================ */
+    function gameOver() {
+        running = false;
+        cancelAnimationFrame(rafId);
+        invincibleTimer = 0;
+
+        if (score > highScore) {
+            highScore = score;
+            localStorage.setItem("bike-high", String(highScore));
+            highScoreEl.textContent = "Best: " + highScore;
+        }
+
+        attempts--;
+        updateHUD();
+        showCrashOverlay();
+    }
+
+    function start() {
+        startOverlay.classList.remove("visible");
+        crashOverlay.classList.remove("visible");
+        gameoverOverlay.classList.remove("visible");
+        fullReset();
+        running = true;
+        rafId = requestAnimationFrame(update);
+    }
+
+    startBtn.addEventListener("click", start);
+    restartBtn.addEventListener("click", start);
+
+    // Idle
+    fullReset();
+    renderIdle();
+
+    </script>
+</body>
+</html>
