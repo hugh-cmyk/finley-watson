@@ -1,0 +1,270 @@
+:root {
+  --ink: #1d1d1f;
+  --hud: #f4f1e8;
+  --hud-shadow: 0 2px 0 #000, 0 0 6px rgba(0, 0, 0, 0.6);
+  --accent: #ffd23b;
+  --boost: #4ec3ff;
+  --danger: #d23b3b;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  background: #8d959f;
+  font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+}
+
+#game {
+  position: fixed;
+  inset: 0;
+}
+
+/* Low-res buffer stretched to full screen for the PS1 crunch. */
+#game-canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ===== HUD ===== */
+#hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  color: var(--hud);
+  text-shadow: var(--hud-shadow);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.hud-corner {
+  position: absolute;
+  padding: 14px 18px;
+}
+
+.hud-top-left {
+  top: env(safe-area-inset-top, 0);
+  left: env(safe-area-inset-left, 0);
+}
+
+.hud-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: clamp(15px, 2.4vw, 22px);
+  line-height: 1.5;
+}
+
+.hud-label {
+  font-size: 0.62em;
+  color: var(--accent);
+  letter-spacing: 0.12em;
+  width: 3.2em;
+}
+
+.hud-top-right {
+  top: env(safe-area-inset-top, 0);
+  right: env(safe-area-inset-right, 0);
+  text-align: right;
+}
+
+#speed {
+  font-size: clamp(38px, 9vw, 76px);
+  line-height: 0.9;
+  font-weight: 800;
+}
+
+.speed-unit {
+  font-size: clamp(9px, 1.6vw, 13px);
+  color: var(--accent);
+  letter-spacing: 0.18em;
+}
+
+#boost-wrap {
+  position: absolute;
+  bottom: calc(18px + env(safe-area-inset-bottom, 0));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(46vw, 360px);
+  text-align: center;
+}
+
+#boost-wrap .hud-label {
+  display: block;
+  width: auto;
+  margin-bottom: 4px;
+}
+
+#boost-bar {
+  height: 14px;
+  border: 2px solid rgba(0, 0, 0, 0.65);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+#boost-fill {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #2b7fb0, var(--boost));
+  transition: width 0.08s linear;
+}
+
+#boost-fill.full {
+  background: linear-gradient(90deg, var(--accent), #fff);
+}
+
+/* ===== Centre messages ===== */
+#message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  text-align: center;
+  color: var(--hud);
+  text-shadow: var(--hud-shadow);
+}
+
+.msg-count {
+  font-size: clamp(80px, 22vw, 200px);
+  font-weight: 900;
+  color: var(--accent);
+}
+
+.msg-count .go {
+  color: #6cff8a;
+}
+
+.big {
+  font-size: clamp(40px, 9vw, 92px);
+  font-weight: 900;
+  color: var(--accent);
+}
+
+.sub {
+  margin-top: 10px;
+  font-size: clamp(16px, 3vw, 26px);
+  font-weight: 700;
+}
+
+.hint {
+  margin-top: 18px;
+  font-size: clamp(12px, 2vw, 16px);
+  opacity: 0.85;
+}
+
+.flash {
+  font-size: clamp(28px, 6vw, 58px);
+  font-weight: 900;
+  color: var(--accent);
+}
+
+/* ===== Restart button ===== */
+#restart {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top, 0));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  font: 700 14px/1 "Trebuchet MS", system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  background: var(--accent);
+  border: 2px solid rgba(0, 0, 0, 0.5);
+  border-radius: 10px;
+  cursor: pointer;
+  z-index: 5;
+}
+
+#restart:active {
+  transform: translateX(-50%) scale(0.96);
+}
+
+/* ===== Touch controls ===== */
+#touch-controls {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.pad {
+  position: absolute;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0));
+  display: flex;
+  gap: 14px;
+}
+
+.pad-left {
+  left: calc(16px + env(safe-area-inset-left, 0));
+}
+
+.pad-right {
+  right: calc(16px + env(safe-area-inset-right, 0));
+  flex-wrap: wrap;
+  width: 168px;
+  justify-content: flex-end;
+}
+
+.tbtn {
+  pointer-events: auto;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  border: 3px solid rgba(0, 0, 0, 0.45);
+  background: rgba(244, 241, 232, 0.82);
+  color: var(--ink);
+  font: 800 22px/1 "Trebuchet MS", system-ui, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+}
+
+.tbtn:active {
+  background: var(--accent);
+  transform: scale(0.94);
+}
+
+.tbtn-wide {
+  width: 100%;
+  height: 48px;
+  border-radius: 14px;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+}
+
+.tbtn-accel {
+  background: rgba(108, 255, 138, 0.85);
+}
+
+.tbtn-boost {
+  background: rgba(78, 195, 255, 0.85);
+}
+
+@media (max-width: 480px) {
+  .tbtn {
+    width: 62px;
+    height: 62px;
+  }
+}
