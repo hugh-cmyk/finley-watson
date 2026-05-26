@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#9fa7b0" />
     <title>Lumber & Lairy — Finley Watson</title>
-    <script type="module" crossorigin src="/racer/assets/index-DSkzIxjf.js"></script>
-    <link rel="stylesheet" crossorigin href="/racer/assets/index-Bzt1KgXP.css">
+    <script type="module" crossorigin src="/racer/assets/index-DvxzXK5j.js"></script>
+    <link rel="stylesheet" crossorigin href="/racer/assets/index-C4rN7CL0.css">
   </head>
   <body>
     <div id="game">
@@ -15,13 +15,17 @@
       <!-- ===== HUD overlay ===== -->
       <div id="hud" class="hidden">
         <div class="hud-corner hud-top-left">
+          <canvas id="minimap" width="150" height="150"></canvas>
           <div class="hud-row"><span class="hud-label">LAP</span><span id="lap">1/3</span></div>
           <div class="hud-row"><span class="hud-label">TIME</span><span id="time">0:00.0</span></div>
           <div class="hud-row"><span class="hud-label">BEST</span><span id="best">--:--.-</span></div>
         </div>
         <div class="hud-corner hud-top-right">
-          <div id="speed">0</div>
-          <div class="speed-unit">MPH-ISH</div>
+          <div id="speedo">
+            <div id="speedo-gauge"></div>
+            <div id="speed">0</div>
+            <div class="speed-unit">MPH-ISH</div>
+          </div>
         </div>
         <div id="boost-wrap">
           <span class="hud-label">LEGGIT</span>

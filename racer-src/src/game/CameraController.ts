@@ -39,8 +39,17 @@ export class CameraController {
       this.lookTarget.copy(ahead);
       this.initialised = true;
     } else {
-      this.current.lerp(desired, Math.min(1, c.followLerp * dt));
-      this.lookTarget.lerp(ahead, Math.min(1, 8 * dt));
+      // Follow X/Z snappily, but trail vertically more slowly. That way a quick
+      // jump visibly lifts the kart in frame (rather than the camera gluing to
+      // its height) while slow terrain changes — rooftops — are still tracked.
+      const xz = Math.min(1, c.followLerp * dt);
+      const y = Math.min(1, 2.5 * dt);
+      this.current.x += (desired.x - this.current.x) * xz;
+      this.current.z += (desired.z - this.current.z) * xz;
+      this.current.y += (desired.y - this.current.y) * y;
+      this.lookTarget.x += (ahead.x - this.lookTarget.x) * Math.min(1, 8 * dt);
+      this.lookTarget.z += (ahead.z - this.lookTarget.z) * Math.min(1, 8 * dt);
+      this.lookTarget.y += (ahead.y - this.lookTarget.y) * Math.min(1, 3 * dt);
     }
     this.camera.position.copy(this.current);
     this.camera.lookAt(this.lookTarget);

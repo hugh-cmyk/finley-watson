@@ -6,6 +6,7 @@ import { PlayerKart } from './PlayerKart';
 import { CameraController } from './CameraController';
 import { InputController } from './InputController';
 import { UI } from './UI';
+import { Minimap } from './Minimap';
 
 type Phase = 'countdown' | 'racing' | 'finished';
 
@@ -28,6 +29,7 @@ export class Game {
   private cameraCtrl: CameraController;
   private input: InputController;
   private ui: UI;
+  private minimap?: Minimap;
 
   private phase: Phase = 'countdown';
   private clock = new THREE.Clock();
@@ -64,8 +66,12 @@ export class Game {
 
     this.kart = new PlayerKart(this.track);
     this.scene.add(this.kart.group);
+    this.scene.add(this.kart.shadow);
 
     this.cameraCtrl = new CameraController(this.camera);
+
+    const minimapCanvas = document.getElementById('minimap') as HTMLCanvasElement | null;
+    if (minimapCanvas) this.minimap = new Minimap(minimapCanvas, this.track);
 
     this.ui = new UI(() => this.restart());
     this.input = new InputController();
@@ -178,6 +184,7 @@ export class Game {
         this.ui.showMessage(`${Math.ceil(this.countdownRemaining)}`, 'count');
       }
       // Hold the kart still on the line, but keep the camera framed.
+      this.minimap?.update(this.kart.position, this.kart.heading);
       this.cameraCtrl.update(this.kart.position, this.kart.heading, 0, dt);
       this.renderer.render(this.scene, this.camera);
       return;
@@ -198,6 +205,7 @@ export class Game {
 
     this.ui.setSpeed(this.kart.state.speed);
     this.ui.setBoost(this.kart.state.boostMeter);
+    this.minimap?.update(this.kart.position, this.kart.heading);
 
     this.cameraCtrl.update(this.kart.position, this.kart.heading, this.kart.speedRatio, dt);
     this.renderer.render(this.scene, this.camera);

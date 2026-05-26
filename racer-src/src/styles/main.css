@@ -85,16 +85,73 @@ body {
   text-align: right;
 }
 
+/* ===== Speedometer (analog gauge + needle) ===== */
+#speedo {
+  position: relative;
+  width: clamp(108px, 22vw, 150px);
+}
+
+#speedo-gauge svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.speedo-arc {
+  fill: none;
+  stroke: rgba(0, 0, 0, 0.45);
+  stroke-width: 5;
+  stroke-linecap: round;
+}
+
+.speedo-tick {
+  stroke: var(--hud);
+  stroke-width: 2;
+}
+
+.speedo-tick.hot {
+  stroke: var(--danger);
+}
+
+.speedo-needle {
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: transform 0.08s linear;
+}
+
+.speedo-hub {
+  fill: var(--hud);
+}
+
 #speed {
-  font-size: clamp(38px, 9vw, 76px);
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 6px;
+  text-align: center;
+  font-size: clamp(26px, 6vw, 42px);
   line-height: 0.9;
   font-weight: 800;
 }
 
 .speed-unit {
-  font-size: clamp(9px, 1.6vw, 13px);
+  text-align: center;
+  font-size: clamp(8px, 1.5vw, 11px);
   color: var(--accent);
-  letter-spacing: 0.18em;
+  letter-spacing: 0.16em;
+}
+
+/* ===== Minimap ===== */
+#minimap {
+  width: clamp(96px, 20vw, 132px);
+  height: clamp(96px, 20vw, 132px);
+  margin-bottom: 8px;
+  border: 2px solid rgba(0, 0, 0, 0.5);
+  border-radius: 10px;
+  background: rgba(20, 26, 22, 0.42);
+  image-rendering: pixelated;
 }
 
 #boost-wrap {

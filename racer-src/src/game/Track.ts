@@ -129,6 +129,17 @@ export class Track {
     };
   }
 
+  /** Down-sampled centreline (XZ) plus the finish point, for drawing the minimap. */
+  minimapData(): { points: Array<{ x: number; z: number }>; finish: { x: number; z: number } } {
+    const step = 6;
+    const points: Array<{ x: number; z: number }> = [];
+    for (let i = 0; i < this.samplePoints.length; i += step) {
+      points.push({ x: this.samplePoints[i].x, z: this.samplePoints[i].z });
+    }
+    const f = this.samplePoints[0];
+    return { points, finish: { x: f.x, z: f.z } };
+  }
+
   // --- geometry -----------------------------------------------------------
 
   private edges(t: number): { left: THREE.Vector3; right: THREE.Vector3 } {

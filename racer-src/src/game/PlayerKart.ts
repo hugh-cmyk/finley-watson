@@ -13,6 +13,9 @@ import { Track } from './Track';
  */
 export class PlayerKart {
   readonly group = new THREE.Group();
+  /** Flat ground shadow, kept on the road surface so jumps read clearly.
+   *  Lives in the scene (not the kart group) so it stays put while the kart rises. */
+  readonly shadow: THREE.Mesh;
   state: KartState;
 
   private frontWheels: THREE.Mesh[] = [];
@@ -24,6 +27,13 @@ export class PlayerKart {
     const start = track.getStartPose();
     this.state = createKartState(start.position, start.heading);
     this.flame = this.buildMesh();
+
+    this.shadow = new THREE.Mesh(
+      new THREE.CircleGeometry(1.5, 16),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32, depthWrite: false }),
+    );
+    this.shadow.rotation.x = -Math.PI / 2;
+
     this.syncTransform(0);
   }
 
@@ -103,9 +113,14 @@ export class PlayerKart {
     const slip = ((s.travelHeading - s.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
     const targetRoll = s.drifting ? THREE.MathUtils.clamp(-slip * 1.4, -0.35, 0.35) : 0;
     this.body.rotation.z += (targetRoll - this.body.rotation.z) * Math.min(1, 10 * dt);
-    // Slight nose-up while boosting.
-    const targetPitch = s.boosting ? -0.06 : 0;
-    this.body.rotation.x += (targetPitch - this.body.rotation.x) * Math.min(1, 8 * dt);
+    // Pitch: nose-up as it leaps, nose-down as it falls (reads as a proper jump);
+    // a slight nose-up while boosting on the ground.
+    const targetPitch = s.airborne
+      ? THREE.MathUtils.clamp(-s.vy * 0.02, -0.4, 0.4)
+      : s.boosting
+        ? -0.06
+        : 0;
+    this.body.rotation.x += (targetPitch - this.body.rotation.x) * Math.min(1, 9 * dt);
 
     // Wheel spin (all four roll with forward speed).
     const spin = s.speed * dt * 1.8;
@@ -117,6 +132,14 @@ export class PlayerKart {
       const f = 0.8 + Math.random() * 0.5;
       this.flame.scale.set(1, f, 1);
     }
+
+    // Ground shadow stays pinned to the road surface; it shrinks and fades as the
+    // kart climbs, so the gap between kart and shadow reads as jump height.
+    const airGap = Math.max(0, s.position.y - (s.surfaceHeight + CONFIG.kart.groundOffset));
+    this.shadow.position.set(s.position.x, s.surfaceHeight + 0.05, s.position.z);
+    const shrink = THREE.MathUtils.clamp(1 - airGap * 0.07, 0.45, 1);
+    this.shadow.scale.setScalar(shrink);
+    (this.shadow.material as THREE.MeshBasicMaterial).opacity = 0.32 * shrink;
   }
 
   /** Convenience accessors for camera / UI / lap logic. */

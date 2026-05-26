@@ -6,9 +6,9 @@ import { Track } from './Track';
 // These shape how the kart *feels*. Kept at the top of the physics file so
 // they're quick to find and tweak after play-testing. Fun and flow over realism.
 
-const JUMP_FORCE = 17; // upward velocity of the first (grounded) jump
-const DOUBLE_JUMP_FORCE = 15; // upward velocity of the mid-air second leap
-const GRAVITY = 32; // downward acceleration while airborne
+const JUMP_FORCE = 22; // upward velocity of the first (grounded) jump — apex ~8m, lifts the whole kart well clear
+const DOUBLE_JUMP_FORCE = 19; // upward velocity of the mid-air second leap
+const GRAVITY = 30; // downward acceleration while airborne (lower = floatier hang time)
 const MAX_JUMPS = 2; // hops allowed before touching the track again
 const AIR_STEER_SCALE = 0.6; // steering authority kept while airborne (0..1)
 
@@ -38,6 +38,7 @@ export interface KartState {
   vy: number; // vertical velocity (jumping / falling)
   jumpsRemaining: number; // hops left before landing (see MAX_JUMPS)
   jumpHeld: boolean; // previous-frame jump state, for rising-edge detection
+  surfaceHeight: number; // road height directly beneath the kart (for the shadow)
 }
 
 export function createKartState(position: THREE.Vector3, heading: number): KartState {
@@ -56,6 +57,7 @@ export function createKartState(position: THREE.Vector3, heading: number): KartS
     vy: 0,
     jumpsRemaining: MAX_JUMPS,
     jumpHeld: false,
+    surfaceHeight: position.y - CONFIG.kart.groundOffset,
   };
 }
 
@@ -233,6 +235,7 @@ export function resolveCollisions(k: KartState, track: Track, dt: number): void 
   }
 
   // --- vertical: land jumps, otherwise follow the road surface ---
+  k.surfaceHeight = s.height; // remembered so the shadow can sit on the ground
   const targetY = s.height + C.groundOffset;
   if (k.airborne) {
     if (k.vy <= 0 && k.position.y <= targetY) {
