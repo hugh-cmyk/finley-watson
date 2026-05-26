@@ -105,8 +105,10 @@ export function stepKart(k: KartState, input: InputState, dt: number): void {
   k.speed = clamp(k.speed, -C.reverseSpeed, topSpeed);
 
   // --- steering ---
-  // Combine digital keys/touch with the analog mouse axis (+1 left .. -1 right).
-  const steer = clamp((input.left ? 1 : 0) - (input.right ? 1 : 0) + input.steerAxis, -1, 1);
+  // Keyboard/touch take priority; the analog mouse axis (+1 left .. -1 right) is
+  // only used when no steering key is held, so a resting cursor never fights you.
+  const keySteer = (input.left ? 1 : 0) - (input.right ? 1 : 0);
+  const steer = clamp(keySteer !== 0 ? keySteer : input.steerAxis, -1, 1);
   const moving = Math.abs(k.speed) > 0.5;
 
   // Drift engages while held, you're moving with intent, and turning.

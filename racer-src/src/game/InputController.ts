@@ -12,6 +12,10 @@ export class InputController {
   private boundKeyDown = (e: KeyboardEvent) => this.onKey(e, true);
   private boundKeyUp = (e: KeyboardEvent) => this.onKey(e, false);
 
+  /** Mouse steering target + when the mouse last moved (for idle auto-centring). */
+  private mouseSteer = 0;
+  private lastMouseMoveAt = -Infinity;
+
   constructor() {
     window.addEventListener('keydown', this.boundKeyDown);
     window.addEventListener('keyup', this.boundKeyUp);
@@ -66,7 +70,8 @@ export class InputController {
       let v = 0;
       if (Math.abs(nx) > dz) v = (nx - Math.sign(nx) * dz) / (1 - dz);
       // +1 left / -1 right to match the A/D convention.
-      this.state.steerAxis = Math.max(-1, Math.min(1, -v * 1.4));
+      this.mouseSteer = Math.max(-1, Math.min(1, -v * 1.4));
+      this.lastMouseMoveAt = performance.now();
     });
 
     // Hold the left mouse button to boost (natural trigger when steering by mouse).
@@ -107,6 +112,19 @@ export class InputController {
     hold('btn-drift', 'drift');
     hold('btn-boost', 'boost');
     hold('btn-jump', 'jump');
+  }
+
+  /** Per-frame: apply mouse steering only while the mouse is actively moving;
+   *  a parked cursor eases back to centre so it never causes a constant pull. */
+  update(dt: number): void {
+    const idleMs = performance.now() - this.lastMouseMoveAt;
+    if (idleMs > 140) {
+      // Mouse has stopped — relax steering to straight.
+      this.state.steerAxis += (0 - this.state.steerAxis) * Math.min(1, 12 * dt);
+      if (Math.abs(this.state.steerAxis) < 0.02) this.state.steerAxis = 0;
+    } else {
+      this.state.steerAxis = this.mouseSteer;
+    }
   }
 
   dispose(): void {

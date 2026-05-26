@@ -172,6 +172,7 @@ export class Game {
 
   private frame(): void {
     const dt = Math.min(this.clock.getDelta(), 1 / 20); // clamp big stalls
+    this.input.update(dt); // ease mouse-steer back to centre when the mouse is idle
 
     if (this.phase === 'countdown') {
       this.countdownRemaining -= dt;
