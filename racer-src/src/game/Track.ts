@@ -21,6 +21,7 @@ export interface TrackSample {
 export interface Obstacle {
   position: THREE.Vector3;
   radius: number;
+  height: number; // clear this much vertical height (by jumping) to pass over it
   // Future: health/destructible flag, gadget triggers, AI traffic movement.
 }
 
@@ -325,9 +326,11 @@ export class Track {
       this.group.add(bus);
 
       // Future: mark as destructible / movable AI traffic here.
+      // Tall: only a well-timed jump clears a bus.
       this.obstacles.push({
         position: new THREE.Vector3(x, p.y, z),
         radius: 3.4,
+        height: 4.2,
       });
     }
 
@@ -353,7 +356,8 @@ export class Track {
       );
       cone.position.set(x, p.y + 0.8, z);
       this.group.add(cone);
-      this.obstacles.push({ position: new THREE.Vector3(x, p.y, z), radius: 1.1 });
+      // Short: any decent hop sends you sailing over a cone.
+      this.obstacles.push({ position: new THREE.Vector3(x, p.y, z), radius: 1.1, height: 1.6 });
     }
   }
 

@@ -21,13 +21,24 @@ npm run typecheck  # type-check only
 | --- | --- | --- |
 | Accelerate | W / ↑ | ▲ |
 | Brake / reverse | S / ↓ | ▼ |
-| Steer left | A / ← | ◀ |
-| Steer right | D / → | ▶ |
-| Drift | Space | DRIFT |
-| Boost ("Leggit") | Shift | LEGGIT |
+| Steer | A / D, ← / →, or **move the mouse** | ◀ ▶ |
+| Jump | Space | JUMP |
+| Drift | Shift | DRIFT |
+| Boost ("Leggit") | B or **left mouse button** | LEGGIT |
 | Restart | R | ↻ button |
 
-Drift long enough through a corner to bank a **mini-turbo** that tops up the boost meter.
+Steer with the mouse like a wheel — move it left/right, centre is straight ahead
+(it stays inactive until you first move the mouse, so keyboard-only play is unaffected).
+**Jump** to clear obstacles — one press hops, a second press mid-air gives an extra
+leap (max two before landing). Cones go under any hop; the parody double-decker buses
+need the timing or a double-jump. Drift long enough through a corner to bank a
+**mini-turbo** that tops up the boost meter.
+
+Collisions are arcade-style: barriers and buses slow and deflect you in proportion to
+how head-on the hit is, so you scrape and glance off rather than getting stuck. Jump
+and gravity feel are tuned via the constants at the top of `src/game/Physics.ts`
+(`JUMP_FORCE`, `DOUBLE_JUMP_FORCE`, `GRAVITY`, `MAX_JUMPS`, `COLLISION_SPEED_RETAINED`,
+`COLLISION_BOUNCE_FORCE`, `WALL_SLIDE_FACTOR`, …).
 
 ## Deployment
 

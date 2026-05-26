@@ -41,8 +41,7 @@ export const CONFIG = {
     miniTurboChargeRate: 42, // boost charge accumulated per second of hard drifting
     miniTurboThreshold: 55, // charge needed to actually reward a mini-turbo
 
-    wallScrub: 0.55, // speed kept after clipping a barrier (0..1)
-    obstacleScrub: 0.4, // speed kept after thumping an obstacle
+    // Collision + jump feel lives in Physics.ts (tuning block at the top).
   },
 
   camera: {
@@ -75,7 +74,10 @@ export interface InputState {
   right: boolean;
   drift: boolean;
   boost: boolean;
+  jump: boolean;
   restart: boolean;
+  /** Analog steering from the mouse, -1 (right) .. +1 (left); combined with left/right. */
+  steerAxis: number;
 }
 
 export function createInputState(): InputState {
@@ -86,6 +88,8 @@ export function createInputState(): InputState {
     right: false,
     drift: false,
     boost: false,
+    jump: false,
     restart: false,
+    steerAxis: 0,
   };
 }

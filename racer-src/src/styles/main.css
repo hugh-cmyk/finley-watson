@@ -262,6 +262,12 @@ body {
   background: rgba(78, 195, 255, 0.85);
 }
 
+.tbtn-jump {
+  background: rgba(255, 210, 59, 0.9);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+
 @media (max-width: 480px) {
   .tbtn {
     width: 62px;

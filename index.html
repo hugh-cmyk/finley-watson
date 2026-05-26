@@ -97,6 +97,14 @@
             color: #86868b;
             font-weight: 400;
         }
+
+        .card-count {
+            margin-top: 0.6rem;
+            font-size: 0.74rem;
+            font-weight: 600;
+            color: #b0b0b5;
+            letter-spacing: 0.02em;
+        }
     </style>
 </head>
 <body>
@@ -105,22 +113,63 @@
         <p class="subtitle">Pick a game</p>
 
         <div class="games">
-            <a class="game-card" href="snake.html">
+            <a class="game-card" href="snake.html" data-game="snake">
                 <span class="card-icon">🐍</span>
                 <span class="card-title">Snake</span>
                 <span class="card-desc">Classic arrow-key game</span>
+                <span class="card-count" data-count="snake">0 plays</span>
             </a>
-            <a class="game-card" href="bike.html">
+            <a class="game-card" href="bike.html" data-game="bike">
                 <span class="card-icon">🚴</span>
                 <span class="card-title">Bike Runner</span>
                 <span class="card-desc">Click to jump, dodge obstacles</span>
+                <span class="card-count" data-count="bike">0 plays</span>
             </a>
-            <a class="game-card" href="racer/">
+            <a class="game-card" href="racer/" data-game="racer">
                 <span class="card-icon">🏎️</span>
                 <span class="card-title">Lumber &amp; Lairy</span>
                 <span class="card-desc">Chaotic British kart racing</span>
+                <span class="card-count" data-count="racer">0 plays</span>
             </a>
         </div>
     </div>
+
+    <script>
+        // Per-device play counters (no backend) — stored in this browser's
+        // localStorage. Each count ticks up when its card is opened.
+        (function () {
+            var KEY = 'finley-play-counts';
+
+            function load() {
+                try { return JSON.parse(localStorage.getItem(KEY)) || {}; }
+                catch (e) { return {}; }
+            }
+
+            function save(counts) {
+                try { localStorage.setItem(KEY, JSON.stringify(counts)); }
+                catch (e) { /* storage unavailable — counts just won't persist */ }
+            }
+
+            function label(n) {
+                return n + (n === 1 ? ' play' : ' plays');
+            }
+
+            var counts = load();
+
+            // Render current counts under each card.
+            document.querySelectorAll('.card-count').forEach(function (el) {
+                el.textContent = label(counts[el.dataset.count] || 0);
+            });
+
+            // Increment on click, before navigation (setItem is synchronous).
+            document.querySelectorAll('.game-card').forEach(function (card) {
+                card.addEventListener('click', function () {
+                    var game = card.dataset.game;
+                    counts[game] = (counts[game] || 0) + 1;
+                    save(counts);
+                });
+            });
+        })();
+    </script>
 </body>
 </html>

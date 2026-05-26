@@ -2,6 +2,21 @@ import * as THREE from 'three';
 import { CONFIG, InputState } from '../config';
 import { Track } from './Track';
 
+// ─── Arcade gameplay tuning ──────────────────────────────────────────────────
+// These shape how the kart *feels*. Kept at the top of the physics file so
+// they're quick to find and tweak after play-testing. Fun and flow over realism.
+
+const JUMP_FORCE = 17; // upward velocity of the first (grounded) jump
+const DOUBLE_JUMP_FORCE = 15; // upward velocity of the mid-air second leap
+const GRAVITY = 32; // downward acceleration while airborne
+const MAX_JUMPS = 2; // hops allowed before touching the track again
+const AIR_STEER_SCALE = 0.6; // steering authority kept while airborne (0..1)
+
+const COLLISION_SPEED_RETAINED = 0.82; // speed kept on a fully head-on impact (0..1)
+const COLLISION_BOUNCE_FORCE = 7; // outward shove off a surface on impact
+const WALL_SLIDE_FACTOR = 0.85; // how strongly travel is redirected ALONG a wall
+const OBSTACLE_DEFLECT = 0.4; // how much an obstacle hit nudges you aside (0..1)
+
 /**
  * Arcade kart physics. Deliberately not realistic: we track a *facing* heading
  * and a separate *travel* heading, then let "grip" pull travel toward facing.
@@ -20,6 +35,9 @@ export interface KartState {
   driftDir: number; // -1/0/1 steer direction locked in at drift start
   lastMiniTurbo: boolean; // true on the frame a mini-turbo fires (for FX/SFX)
   airborne: boolean;
+  vy: number; // vertical velocity (jumping / falling)
+  jumpsRemaining: number; // hops left before landing (see MAX_JUMPS)
+  jumpHeld: boolean; // previous-frame jump state, for rising-edge detection
 }
 
 export function createKartState(position: THREE.Vector3, heading: number): KartState {
@@ -35,6 +53,9 @@ export function createKartState(position: THREE.Vector3, heading: number): KartS
     driftDir: 0,
     lastMiniTurbo: false,
     airborne: false,
+    vy: 0,
+    jumpsRemaining: MAX_JUMPS,
+    jumpHeld: false,
   };
 }
 
@@ -53,7 +74,7 @@ function angleDelta(a: number, b: number): number {
   return d;
 }
 
-/** Advance the kart one step: longitudinal, steering, drift, boost, integrate. */
+/** Advance the kart one step: longitudinal, steering, drift, boost, jump, integrate. */
 export function stepKart(k: KartState, input: InputState, dt: number): void {
   const C = CONFIG.kart;
   k.lastMiniTurbo = false;
@@ -82,14 +103,15 @@ export function stepKart(k: KartState, input: InputState, dt: number): void {
   k.speed = clamp(k.speed, -C.reverseSpeed, topSpeed);
 
   // --- steering ---
-  const steer = (input.left ? 1 : 0) - (input.right ? 1 : 0);
+  // Combine digital keys/touch with the analog mouse axis (+1 left .. -1 right).
+  const steer = clamp((input.left ? 1 : 0) - (input.right ? 1 : 0) + input.steerAxis, -1, 1);
   const moving = Math.abs(k.speed) > 0.5;
 
   // Drift engages while held, you're moving with intent, and turning.
   const canDrift = input.drift && Math.abs(k.speed) > 10;
   if (canDrift && !k.drifting) {
     k.drifting = true;
-    k.driftDir = steer !== 0 ? steer : k.driftDir;
+    k.driftDir = Math.abs(steer) > 0.15 ? Math.sign(steer) : k.driftDir;
     k.driftCharge = 0;
   } else if (!input.drift && k.drifting) {
     // Release: reward a banked mini-turbo if we held a long enough slide.
@@ -105,10 +127,11 @@ export function stepKart(k: KartState, input: InputState, dt: number): void {
   let turn = C.turnRate * steer;
   if (k.drifting) {
     turn *= C.driftTurnBonus;
-    if (steer !== 0) k.driftCharge += C.miniTurboChargeRate * dt;
+    if (Math.abs(steer) > 0.15) k.driftCharge += C.miniTurboChargeRate * dt;
   }
-  // Hard to turn at a standstill; reversing inverts the steering.
+  // Hard to turn at a standstill; reversing inverts the steering; less bite midair.
   turn *= clamp(Math.abs(k.speed) / 8, 0, 1);
+  if (k.airborne) turn *= AIR_STEER_SCALE;
   if (moving) k.heading += turn * dt * Math.sign(k.speed);
 
   // --- grip: pull travel direction toward facing ---
@@ -116,51 +139,110 @@ export function stepKart(k: KartState, input: InputState, dt: number): void {
   const blend = 1 - Math.exp(-gripRate * dt);
   k.travelHeading += angleDelta(k.travelHeading, k.heading) * blend;
 
-  // --- integrate position in XZ ---
-  const dx = Math.sin(k.travelHeading) * k.speed * dt;
-  const dz = Math.cos(k.travelHeading) * k.speed * dt;
-  k.position.x += dx;
-  k.position.z += dz;
+  // --- jump / double-jump (rising-edge triggered) ---
+  // One press = one hop. A press while airborne spends the second hop as a fresh
+  // leap. After MAX_JUMPS, further presses are ignored until we land (see
+  // resolveCollisions, which refills jumpsRemaining on touchdown).
+  const jumpEdge = input.jump && !k.jumpHeld;
+  k.jumpHeld = input.jump;
+  if (jumpEdge && k.jumpsRemaining > 0) {
+    k.vy = k.airborne ? DOUBLE_JUMP_FORCE : JUMP_FORCE;
+    k.airborne = true;
+    k.jumpsRemaining -= 1;
+  }
+
+  // --- integrate position ---
+  k.position.x += Math.sin(k.travelHeading) * k.speed * dt;
+  k.position.z += Math.cos(k.travelHeading) * k.speed * dt;
+  if (k.airborne) {
+    k.position.y += k.vy * dt;
+    k.vy -= GRAVITY * dt;
+  }
 }
 
 /**
- * Keep the kart on the track and bounce it off obstacles. Also glues it to the
- * road surface height so it climbs onto the rooftops and back down.
+ * Arcade collision response — flow over accuracy. Barriers and obstacles push
+ * the kart gently away and bleed speed *in proportion to how head-on the hit
+ * was*, so a graze barely slows you and nothing compounds frame-to-frame (which
+ * is what made it feel glued before). Also glues the kart to the road surface
+ * height so it climbs onto the rooftops and back down, and lands jumps.
  */
 export function resolveCollisions(k: KartState, track: Track, dt: number): void {
   const C = CONFIG.kart;
   const s = track.project(k.position);
 
-  // Barriers: clamp lateral offset to the road width.
+  // --- side barriers: deflect + scrape along, never stick ---
   const limit = track.halfWidth - C.radius;
   const over = Math.abs(s.lateralOffset) - limit;
   if (over > 0) {
-    const dir = Math.sign(s.lateralOffset);
-    k.position.x -= s.normal.x * dir * over;
-    k.position.z -= s.normal.y * dir * over;
-    k.speed *= C.wallScrub;
-    // Nudge travel back toward the wall tangent so you scrape along, not stop dead.
-    const tangentHeading = Math.atan2(s.forward.x, s.forward.y);
-    k.travelHeading += angleDelta(k.travelHeading, tangentHeading) * 0.5;
+    const dir = Math.sign(s.lateralOffset); // +1: kart is left of the centreline
+    // Outward normal points from the wall back toward the track centre.
+    const outX = -s.normal.x * dir;
+    const outZ = -s.normal.y * dir;
+
+    // How square is the hit? (component of travel heading into the wall, 0..1)
+    const tdx = Math.sin(k.travelHeading);
+    const tdz = Math.cos(k.travelHeading);
+    const into = clamp(-(tdx * outX + tdz * outZ), 0, 1);
+
+    // Resolve the penetration, plus a small outward bounce that scales with the
+    // head-on component so a scrape doesn't drift you off the wall.
+    k.position.x += outX * (over + COLLISION_BOUNCE_FORCE * into * dt);
+    k.position.z += outZ * (over + COLLISION_BOUNCE_FORCE * into * dt);
+
+    // Redirect travel to slide ALONG the wall. Pick the tangent direction that
+    // best matches where we were already heading so we keep our momentum.
+    let tangentHeading = Math.atan2(s.forward.x, s.forward.y);
+    if (Math.abs(angleDelta(k.travelHeading, tangentHeading)) > Math.PI / 2) {
+      tangentHeading += Math.PI;
+    }
+    k.travelHeading += angleDelta(k.travelHeading, tangentHeading) * WALL_SLIDE_FACTOR;
+
+    // Bleed speed only in proportion to the head-on component — no compounding.
+    k.speed *= 1 - (1 - COLLISION_SPEED_RETAINED) * into;
   }
 
-  // Round obstacles.
+  // --- round obstacles: slow + nudge aside (unless jumped clear) ---
   for (const o of track.obstacles) {
+    if (k.position.y - o.position.y > o.height) continue; // sailed over the top
     const dx = k.position.x - o.position.x;
     const dz = k.position.z - o.position.z;
     const minDist = o.radius + C.radius;
     const dist = Math.hypot(dx, dz);
     if (dist > 0 && dist < minDist) {
-      const push = (minDist - dist) / dist;
-      k.position.x += dx * push;
-      k.position.z += dz * push;
-      k.speed *= C.obstacleScrub;
+      const nx = dx / dist; // unit direction away from the obstacle centre
+      const nz = dz / dist;
+      const overlap = minDist - dist;
+
+      const tdx = Math.sin(k.travelHeading);
+      const tdz = Math.cos(k.travelHeading);
+      const into = clamp(-(tdx * nx + tdz * nz), 0, 1);
+
+      // Push out of the overlap + a bounce away from the centre.
+      k.position.x += nx * (overlap + COLLISION_BOUNCE_FORCE * into * dt);
+      k.position.z += nz * (overlap + COLLISION_BOUNCE_FORCE * into * dt);
+
+      // Glance the travel direction aside so you flow around rather than halt.
+      const awayHeading = Math.atan2(nx, nz);
+      k.travelHeading += angleDelta(k.travelHeading, awayHeading) * OBSTACLE_DEFLECT * into;
+
+      // Slow proportional to how square the hit was; keep moving otherwise.
+      k.speed *= 1 - (1 - COLLISION_SPEED_RETAINED) * into;
       // Future: trigger destructible damage / gadget effects here.
     }
   }
 
-  // Follow the road surface (smoothed so ramps feel like little launches).
+  // --- vertical: land jumps, otherwise follow the road surface ---
   const targetY = s.height + C.groundOffset;
-  k.position.y += (targetY - k.position.y) * Math.min(1, 9 * dt);
-  k.airborne = k.position.y > targetY + 0.6;
+  if (k.airborne) {
+    if (k.vy <= 0 && k.position.y <= targetY) {
+      k.position.y = targetY;
+      k.vy = 0;
+      k.airborne = false;
+      k.jumpsRemaining = MAX_JUMPS; // refill only on touchdown
+    }
+  } else {
+    k.position.y += (targetY - k.position.y) * Math.min(1, 9 * dt);
+    k.jumpsRemaining = MAX_JUMPS; // stay topped up while grounded
+  }
 }
