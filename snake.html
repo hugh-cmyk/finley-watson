@@ -194,10 +194,11 @@
         .dpad-right { grid-column: 3; grid-row: 2; }
         .dpad-down { grid-column: 2; grid-row: 3; }
 
-        /* Only show the D-pad on touch devices */
-        @media (hover: hover) and (pointer: fine) {
-            .dpad { display: none; }
-        }
+        /* Hidden by default; revealed via JS on touch-capable devices.
+           (Media queries are unreliable — iPad Safari can report
+           hover/fine, especially in desktop mode or with a trackpad.) */
+        .dpad { display: none; }
+        .dpad.touch { display: grid; }
     </style>
 </head>
 <body>
@@ -421,7 +422,11 @@
         });
 
         // Touch D-pad controls (iPad / mobile)
-        document.getElementById("dpad").querySelectorAll(".dpad-btn").forEach(btn => {
+        const dpad = document.getElementById("dpad");
+        if (navigator.maxTouchPoints > 0 || "ontouchstart" in window) {
+            dpad.classList.add("touch");
+        }
+        dpad.querySelectorAll(".dpad-btn").forEach(btn => {
             const name = btn.dataset.dir;
             // pointerdown gives the lowest-latency response and covers touch + mouse
             btn.addEventListener("pointerdown", e => {
