@@ -104,15 +104,25 @@
         }
 
         .wordmark {
+            --edge: rgba(5, 1, 16, 0.92);   /* crisp per-letter contour */
             font-weight: 700;
             font-size: clamp(2.1rem, 9vw, 5.25rem);
             line-height: 0.95;
             letter-spacing: 0.02em;
             color: #fffaf0;
             text-shadow:
-                0 0 18px rgba(255, 233, 199, 0.55),
-                0 0 46px rgba(255, 200, 130, 0.40),
-                0 0 90px rgba(255, 170, 90, 0.28);
+                /* tight dark outline (8 directions) so each letter cuts
+                   cleanly out of the bright galactic core behind it */
+                -1px -1px 0 var(--edge),  1px -1px 0 var(--edge),
+                -1px  1px 0 var(--edge),  1px  1px 0 var(--edge),
+                 0   -1px 0 var(--edge),  0    1px 0 var(--edge),
+                -1px  0   0 var(--edge),  1px  0   0 var(--edge),
+                /* soft dark separation halo */
+                 0    0   4px rgba(5, 1, 16, 0.85),
+                /* the letter's own warm glow */
+                 0    0   9px rgba(255, 236, 206, 0.95),
+                 0    0   20px rgba(255, 208, 146, 0.75),
+                 0    0   42px rgba(255, 178, 108, 0.5);
         }
         .wordmark .a { display: block; }
 
