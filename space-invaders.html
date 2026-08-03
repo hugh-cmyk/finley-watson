@@ -39,6 +39,7 @@ canvas{display:block;width:100%;height:auto}
   align-items:center;justify-content:center;background:rgba(10,10,15,.92);
   text-align:center;gap:1rem;
 }
+.overlay.hidden{display:none}
 .overlay h2{font-size:1.6rem;letter-spacing:.1em;color:#39ff14;font-weight:700}
 .overlay .sub{font-size:.8rem;color:#888;letter-spacing:.05em}
 .overlay .final{font-size:1.1rem;color:#ffe44d;letter-spacing:.06em;margin-top:.25rem}
@@ -60,9 +61,9 @@ canvas{display:block;width:100%;height:auto}
 }
 .touch-btn:active{background:#1a1a2a}
 .touch-btn.fire{color:#ff3a3a;border-color:#ff3a3a44}
-@media(hover:none)and(pointer:coarse){
-  .touch-controls{display:flex}
-}
+/* Reliable touch detection is done in JS (navigator.maxTouchPoints);
+   iPad Safari can report hover/fine, so a media query alone is unreliable. */
+.touch-controls.show{display:flex}
 @media(max-width:740px){
   .hud{padding:.25rem .25rem;font-size:.7rem}
 }
@@ -84,12 +85,12 @@ canvas{display:block;width:100%;height:auto}
     <div class="sub">Arrow keys to move &middot; Space to fire</div>
     <button class="btn" id="bPlay">PLAY</button>
   </div>
-  <div class="overlay" id="oOver" style="display:none">
+  <div class="overlay hidden" id="oOver">
     <h2>GAME OVER</h2>
     <div class="final" id="fScore"></div>
     <button class="btn" id="bAgain">PLAY AGAIN</button>
   </div>
-  <div class="overlay" id="oLevel" style="display:none">
+  <div class="overlay hidden" id="oLevel">
     <h2 id="lvlTitle">LEVEL CLEAR</h2>
     <button class="btn" id="bNext">NEXT LEVEL</button>
   </div>
@@ -109,286 +110,307 @@ canvas{display:block;width:100%;height:auto}
 (function(){
 "use strict";
 
-/* ── constants ── */
-const W=700,H=490,COLS=11,ROWS=5,INV_W=30,INV_H=22,INV_PAD=14;
-const PLR_W=36,PLR_H=22,PLR_SPD=4.5,BULL_SPD=7;
-const BUNKER_COLS=36,BUNKER_ROWS=24,BUNKER_CELL=2;
-const GREEN='#39ff14',RED='#ff3a3a',YELLOW='#ffe44d',CYAN='#00eeff',BG='#0a0a0f';
+var W=700, H=490, COLS=11, ROWS=5, INV_W=30, INV_H=22, INV_PAD=14;
+var PLR_W=36, PLR_H=22, PLR_SPD=4.5, BULL_SPD=7;
+var BUNKER_COLS=36, BUNKER_ROWS=24, BUNKER_CELL=2;
+var GREEN='#39ff14', RED='#ff3a3a', YELLOW='#ffe44d', CYAN='#00eeff', BG='#0a0a0f';
 
-/* ── canvas ── */
-const cv=document.getElementById('c');
-cv.width=W;cv.height=H;
-const ctx=cv.getContext('2d');
+var cv = document.getElementById('c');
+cv.width = W; cv.height = H;
+var ctx = cv.getContext('2d');
 
-/* ── state ── */
-let score,best,lives,level,gameOver,levelClear,playing;
-let player,bullet,invaders,invDir,invDropNext,invSpeed,invStepTimer,invAnimFrame;
-let eBullets,eFRate,eFTimer;
-let bunkers,saucer,saucerTimer,saucerDir;
-let particles,floaters,stars;
-let respawnTimer;
-let keys={};
+// all state initialised to safe defaults so draw() never crashes
+var score=0, best=0, lives=3, level=1;
+var playing=false, gameOver=false, levelClear=false;
+var player={x:W/2,y:H-40};
+var bullet=null;
+var invaders=[], invDir=1, invDropNext=false, invSpeed=18, invStepTimer=0, invAnimFrame=0;
+var eBullets=[], eFRate=120, eFTimer=120;
+var bunkers=[];
+var saucer=null, saucerTimer=600, saucerDir=1;
+var particles=[], floaters=[], stars=[];
+var respawnTimer=0;
+var keys={};
 
-best=parseInt(localStorage.getItem('si_best'))||0;
-document.getElementById('hBest').textContent=best;
+best = parseInt(localStorage.getItem('si_best')) || 0;
+document.getElementById('hBest').textContent = best;
 
-/* ── stars ── */
-function initStars(){stars=[];for(let i=0;i<80;i++)stars.push({x:Math.random()*W,y:Math.random()*H,s:Math.random()*1.5+.5,sp:Math.random()*.3+.1})}
+// ── stars ──
+function initStars(){
+  stars=[];
+  for(var i=0;i<80;i++) stars.push({
+    x:Math.random()*W, y:Math.random()*H,
+    s:Math.random()*1.5+.5, sp:Math.random()*.3+.1
+  });
+}
+initStars();
 
-/* ── bunker template ── */
+// ── bunker ──
 function makeBunker(bx,by){
-  const g=[];
-  const cw=BUNKER_COLS,ch=BUNKER_ROWS;
-  for(let r=0;r<ch;r++){g[r]=[];for(let c=0;c<cw;c++)g[r][c]=0}
-  // arch shape
-  for(let r=0;r<ch;r++)for(let c=0;c<cw;c++){
-    // outer rectangle
-    if(r>=0)g[r][c]=1;
-    // round top corners
-    const dx=c<cw/2?c:cw-1-c; const dy=r;
-    if(dy<6&&dx<6-dy)g[r][c]=0;
-    // inner arch cutout at bottom
-    const cx2=Math.abs(c-(cw-1)/2);
-    if(r>=ch-8&&cx2<6)g[r][c]=0;
+  var g=[];
+  for(var r=0;r<BUNKER_ROWS;r++){
+    g[r]=[];
+    for(var c=0;c<BUNKER_COLS;c++){
+      g[r][c]=1;
+      var dx = c < BUNKER_COLS/2 ? c : BUNKER_COLS-1-c;
+      if(r<6 && dx<6-r) g[r][c]=0;
+      var cx2 = Math.abs(c-(BUNKER_COLS-1)/2);
+      if(r>=BUNKER_ROWS-8 && cx2<6) g[r][c]=0;
+    }
   }
-  return{x:bx,y:by,grid:g}
+  return {x:bx, y:by, grid:g};
 }
 
 function initBunkers(){
   bunkers=[];
-  const bw=BUNKER_COLS*BUNKER_CELL,gap=(W-bw*4)/5;
-  for(let i=0;i<4;i++){
-    bunkers.push(makeBunker(gap+i*(bw+gap),H-90));
-  }
+  var bw=BUNKER_COLS*BUNKER_CELL, gap=(W-bw*4)/5;
+  for(var i=0;i<4;i++) bunkers.push(makeBunker(gap+i*(bw+gap), H-90));
 }
 
-/* ── invaders ── */
+// ── invaders ──
 function initInvaders(){
-  invaders=[];invDir=1;invDropNext=false;invAnimFrame=0;
-  const startX=(W-(COLS*(INV_W+INV_PAD)-INV_PAD))/2;
-  const startY=50+Math.min(level-1,5)*8;
-  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
-    const type=r===0?'squid':r<=2?'crab':'octo';
-    const pts=r===0?30:r<=2?20:10;
-    invaders.push({x:startX+c*(INV_W+INV_PAD),y:startY+r*(INV_H+10),type,pts,alive:true});
+  invaders=[]; invDir=1; invDropNext=false; invAnimFrame=0;
+  var startX = (W-(COLS*(INV_W+INV_PAD)-INV_PAD))/2;
+  var startY = 50 + Math.min(level-1,5)*8;
+  for(var r=0;r<ROWS;r++){
+    for(var c=0;c<COLS;c++){
+      var type = r===0?'squid':r<=2?'crab':'octo';
+      var pts = r===0?30:r<=2?20:10;
+      invaders.push({x:startX+c*(INV_W+INV_PAD), y:startY+r*(INV_H+10), type:type, pts:pts, alive:true});
+    }
   }
-  invSpeed=Math.max(18-level*2,4);
-  invStepTimer=0;
-  eFRate=Math.max(120-level*15,30);
-  eFTimer=eFRate;
+  invSpeed = Math.max(18-level*2, 4);
+  invStepTimer = 0;
+  eFRate = Math.max(120-level*15, 30);
+  eFTimer = eFRate;
 }
 
-/* ── draw invader ── */
+// ── draw invader pixel art ──
 function drawInvader(x,y,type,frame){
   ctx.save();
-  ctx.shadowColor=GREEN;ctx.shadowBlur=6;
-  ctx.fillStyle=type==='squid'?CYAN:type==='crab'?GREEN:YELLOW;
-  const s=2; // pixel scale
-  const px=(px_,py_)=>{ctx.fillRect(x+px_*s,y+py_*s,s,s)};
+  ctx.shadowColor=GREEN; ctx.shadowBlur=6;
+  ctx.fillStyle = type==='squid'?CYAN : type==='crab'?GREEN : YELLOW;
+  var s=2;
+  var px=function(c,r){ctx.fillRect(x+c*s, y+r*s, s, s)};
+
   if(type==='squid'){
-    // squid: 8x8 pixel art
     if(frame===0){
-      [3,4].forEach(c=>{px(c,0)});
-      [2,3,4,5].forEach(c=>{px(c,1)});
-      [1,2,3,4,5,6].forEach(c=>{px(c,2)});
-      [0,1,3,4,6,7].forEach(c=>{px(c,3)});
-      [0,1,2,3,4,5,6,7].forEach(c=>{px(c,4)});
-      [2,5].forEach(c=>{px(c,5)});
-      [1,2,5,6].forEach(c=>{px(c,6)});
-      [0,1,6,7].forEach(c=>{px(c,7)});
+      [3,4].forEach(function(c){px(c,0)});
+      [2,3,4,5].forEach(function(c){px(c,1)});
+      [1,2,3,4,5,6].forEach(function(c){px(c,2)});
+      [0,1,3,4,6,7].forEach(function(c){px(c,3)});
+      [0,1,2,3,4,5,6,7].forEach(function(c){px(c,4)});
+      [2,5].forEach(function(c){px(c,5)});
+      [1,2,5,6].forEach(function(c){px(c,6)});
+      [0,1,6,7].forEach(function(c){px(c,7)});
     } else {
-      [3,4].forEach(c=>{px(c,0)});
-      [2,3,4,5].forEach(c=>{px(c,1)});
-      [1,2,3,4,5,6].forEach(c=>{px(c,2)});
-      [0,1,3,4,6,7].forEach(c=>{px(c,3)});
-      [0,1,2,3,4,5,6,7].forEach(c=>{px(c,4)});
-      [1,6].forEach(c=>{px(c,5)});
-      [2,3,4,5].forEach(c=>{px(c,6)});
-      [1,2,5,6].forEach(c=>{px(c,7)});
+      [3,4].forEach(function(c){px(c,0)});
+      [2,3,4,5].forEach(function(c){px(c,1)});
+      [1,2,3,4,5,6].forEach(function(c){px(c,2)});
+      [0,1,3,4,6,7].forEach(function(c){px(c,3)});
+      [0,1,2,3,4,5,6,7].forEach(function(c){px(c,4)});
+      [1,6].forEach(function(c){px(c,5)});
+      [2,3,4,5].forEach(function(c){px(c,6)});
+      [1,2,5,6].forEach(function(c){px(c,7)});
     }
   } else if(type==='crab'){
     if(frame===0){
-      [2,8].forEach(c=>{px(c,0)});
-      [3,7].forEach(c=>{px(c,1)});
-      [2,3,4,5,6,7,8].forEach(c=>{px(c,2)});
-      [1,2,4,5,6,8,9].forEach(c=>{px(c,3)});
-      [0,1,2,3,4,5,6,7,8,9,10].forEach(c=>{px(c,4)});
-      [0,2,3,4,5,6,7,8,10].forEach(c=>{px(c,5)});
-      [0,2,8,10].forEach(c=>{px(c,6)});
-      [3,4,6,7].forEach(c=>{px(c,7)});
+      [2,8].forEach(function(c){px(c,0)});
+      [3,7].forEach(function(c){px(c,1)});
+      [2,3,4,5,6,7,8].forEach(function(c){px(c,2)});
+      [1,2,4,5,6,8,9].forEach(function(c){px(c,3)});
+      [0,1,2,3,4,5,6,7,8,9,10].forEach(function(c){px(c,4)});
+      [0,2,3,4,5,6,7,8,10].forEach(function(c){px(c,5)});
+      [0,2,8,10].forEach(function(c){px(c,6)});
+      [3,4,6,7].forEach(function(c){px(c,7)});
     } else {
-      [2,8].forEach(c=>{px(c,0)});
-      [3,7].forEach(c=>{px(c,1)});
-      [2,3,4,5,6,7,8].forEach(c=>{px(c,2)});
-      [1,2,4,5,6,8,9].forEach(c=>{px(c,3)});
-      [0,1,2,3,4,5,6,7,8,9,10].forEach(c=>{px(c,4)});
-      [0,2,3,4,5,6,7,8,10].forEach(c=>{px(c,5)});
-      [0,10].forEach(c=>{px(c,6)});
-      [1,2,8,9].forEach(c=>{px(c,7)});
+      [2,8].forEach(function(c){px(c,0)});
+      [3,7].forEach(function(c){px(c,1)});
+      [2,3,4,5,6,7,8].forEach(function(c){px(c,2)});
+      [1,2,4,5,6,8,9].forEach(function(c){px(c,3)});
+      [0,1,2,3,4,5,6,7,8,9,10].forEach(function(c){px(c,4)});
+      [0,2,3,4,5,6,7,8,10].forEach(function(c){px(c,5)});
+      [0,10].forEach(function(c){px(c,6)});
+      [1,2,8,9].forEach(function(c){px(c,7)});
     }
-  } else { // octo
+  } else {
     if(frame===0){
-      [4,5,6,7].forEach(c=>{px(c,0)});
-      [1,2,3,4,5,6,7,8,9,10].forEach(c=>{px(c,1)});
-      [0,1,2,3,4,5,6,7,8,9,10,11].forEach(c=>{px(c,2)});
-      [0,1,2,4,5,7,8,9,10,11].forEach(c=>{px(c,3)});
-      [0,1,2,3,4,5,6,7,8,9,10,11].forEach(c=>{px(c,4)});
-      [2,3,8,9].forEach(c=>{px(c,5)});
-      [1,2,3,4,5,6,7,8,9,10].forEach(c=>{px(c,6)});
-      [0,1,10,11].forEach(c=>{px(c,7)});
+      [4,5,6,7].forEach(function(c){px(c,0)});
+      [1,2,3,4,5,6,7,8,9,10].forEach(function(c){px(c,1)});
+      [0,1,2,3,4,5,6,7,8,9,10,11].forEach(function(c){px(c,2)});
+      [0,1,2,4,5,7,8,9,10,11].forEach(function(c){px(c,3)});
+      [0,1,2,3,4,5,6,7,8,9,10,11].forEach(function(c){px(c,4)});
+      [2,3,8,9].forEach(function(c){px(c,5)});
+      [1,2,3,4,5,6,7,8,9,10].forEach(function(c){px(c,6)});
+      [0,1,10,11].forEach(function(c){px(c,7)});
     } else {
-      [4,5,6,7].forEach(c=>{px(c,0)});
-      [1,2,3,4,5,6,7,8,9,10].forEach(c=>{px(c,1)});
-      [0,1,2,3,4,5,6,7,8,9,10,11].forEach(c=>{px(c,2)});
-      [0,1,2,4,5,7,8,9,10,11].forEach(c=>{px(c,3)});
-      [0,1,2,3,4,5,6,7,8,9,10,11].forEach(c=>{px(c,4)});
-      [2,3,8,9].forEach(c=>{px(c,5)});
-      [1,2,3,4,5,6,7,8,9,10].forEach(c=>{px(c,6)});
-      [2,3,8,9].forEach(c=>{px(c,7)});
+      [4,5,6,7].forEach(function(c){px(c,0)});
+      [1,2,3,4,5,6,7,8,9,10].forEach(function(c){px(c,1)});
+      [0,1,2,3,4,5,6,7,8,9,10,11].forEach(function(c){px(c,2)});
+      [0,1,2,4,5,7,8,9,10,11].forEach(function(c){px(c,3)});
+      [0,1,2,3,4,5,6,7,8,9,10,11].forEach(function(c){px(c,4)});
+      [2,3,8,9].forEach(function(c){px(c,5)});
+      [1,2,3,4,5,6,7,8,9,10].forEach(function(c){px(c,6)});
+      [2,3,8,9].forEach(function(c){px(c,7)});
     }
   }
   ctx.restore();
 }
 
-/* ── draw player ── */
+// ── draw player ──
 function drawPlayer(px,py,alpha){
-  ctx.save();ctx.globalAlpha=alpha||1;
-  ctx.shadowColor=GREEN;ctx.shadowBlur=8;ctx.fillStyle=GREEN;
-  // base
-  ctx.fillRect(px-PLR_W/2,py,PLR_W,8);
-  // body
-  ctx.fillRect(px-12,py-6,24,6);
-  // barrel
-  ctx.fillRect(px-2,py-14,4,8);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.shadowColor=GREEN; ctx.shadowBlur=8; ctx.fillStyle=GREEN;
+  ctx.fillRect(px-PLR_W/2, py, PLR_W, 8);
+  ctx.fillRect(px-12, py-6, 24, 6);
+  ctx.fillRect(px-2, py-14, 4, 8);
   ctx.restore();
 }
 
-/* ── draw saucer ── */
+// ── draw saucer ──
 function drawSaucer(sx,sy){
-  ctx.save();ctx.shadowColor=RED;ctx.shadowBlur=10;
-  ctx.fillStyle=RED;
-  // body ellipse
-  ctx.beginPath();ctx.ellipse(sx,sy,24,8,0,0,Math.PI*2);ctx.fill();
-  // dome
-  ctx.beginPath();ctx.ellipse(sx,sy-6,12,6,0,Math.PI,0);ctx.fill();
-  // portholes
+  ctx.save();
+  ctx.shadowColor=RED; ctx.shadowBlur=10; ctx.fillStyle=RED;
+  ctx.beginPath(); ctx.ellipse(sx,sy,24,8,0,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(sx,sy-6,12,6,0,Math.PI,0); ctx.fill();
   ctx.fillStyle=YELLOW;
-  [-10,0,10].forEach(dx=>{ctx.beginPath();ctx.arc(sx+dx,sy,2,0,Math.PI*2);ctx.fill()});
+  [-10,0,10].forEach(function(dx){ctx.beginPath();ctx.arc(sx+dx,sy,2,0,Math.PI*2);ctx.fill()});
   ctx.restore();
 }
 
-/* ── particles ── */
+// ── particles ──
 function spawnExplosion(x,y,color,n){
-  for(let i=0;i<(n||12);i++){
-    const a=Math.random()*Math.PI*2,sp=Math.random()*2+1;
-    particles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:30+Math.random()*20,color});
+  n = n||12;
+  for(var i=0;i<n;i++){
+    var a=Math.random()*Math.PI*2, sp=Math.random()*2+1;
+    particles.push({x:x,y:y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:30+Math.random()*20,color:color});
   }
 }
+
 function spawnFloater(x,y,text){
-  floaters.push({x,y,text,life:50});
+  floaters.push({x:x,y:y,text:text,life:50});
 }
 
-/* ── bunker damage ── */
+// ── bunker damage ──
 function damageBunker(b,bx,by,radius){
-  const cw=BUNKER_CELL;
-  let hit=false;
-  for(let r=0;r<BUNKER_ROWS;r++)for(let c=0;c<BUNKER_COLS;c++){
-    if(!b.grid[r][c])continue;
-    const cx=b.x+c*cw+cw/2, cy=b.y+r*cw+cw/2;
-    if(Math.abs(cx-bx)<radius&&Math.abs(cy-by)<radius){
-      b.grid[r][c]=0;hit=true;
+  var hit=false;
+  for(var r=0;r<BUNKER_ROWS;r++){
+    for(var c=0;c<BUNKER_COLS;c++){
+      if(!b.grid[r][c]) continue;
+      var cx=b.x+c*BUNKER_CELL+BUNKER_CELL/2;
+      var cy=b.y+r*BUNKER_CELL+BUNKER_CELL/2;
+      if(Math.abs(cx-bx)<radius && Math.abs(cy-by)<radius){
+        b.grid[r][c]=0; hit=true;
+      }
     }
   }
   return hit;
 }
 
-/* ── collision helpers ── */
+// ── collision ──
 function rectHit(ax,ay,aw,ah,bx,by,bw,bh){
-  return ax<bx+bw&&ax+aw>bx&&ay<by+bh&&ay+ah>by;
+  return ax<bx+bw && ax+aw>bx && ay<by+bh && ay+ah>by;
 }
+
 function pointInBunker(b,px,py){
-  const c=Math.floor((px-b.x)/BUNKER_CELL), r=Math.floor((py-b.y)/BUNKER_CELL);
-  if(r<0||r>=BUNKER_ROWS||c<0||c>=BUNKER_COLS)return false;
+  var c=Math.floor((px-b.x)/BUNKER_CELL);
+  var r=Math.floor((py-b.y)/BUNKER_CELL);
+  if(r<0||r>=BUNKER_ROWS||c<0||c>=BUNKER_COLS) return false;
   return b.grid[r][c]===1;
 }
 
-/* ── init game ── */
-function initGame(){
-  score=0;lives=3;level=1;gameOver=false;levelClear=false;playing=true;
-  respawnTimer=0;
-  player={x:W/2,y:H-40};bullet=null;eBullets=[];
-  particles=[];floaters=[];
-  saucer=null;saucerTimer=600;
-  initStars();initInvaders();initBunkers();
-  updateHud();
-}
-
-function nextLevel(){
-  level++;levelClear=false;playing=true;
-  bullet=null;eBullets=[];particles=[];floaters=[];
-  saucer=null;saucerTimer=600;respawnTimer=0;
-  initInvaders();initBunkers();
-  updateHud();
-}
-
+// ── hud ──
 function updateHud(){
   document.getElementById('hScore').textContent=score;
   document.getElementById('hLevel').textContent=level;
   document.getElementById('hBest').textContent=best;
-  let lh='';for(let i=0;i<3;i++)lh+=`<span style="font-size:1rem;margin-right:4px" class="${i>=lives?'lost':''}">\u25B2</span>`;
+  var lh='';
+  for(var i=0;i<3;i++){
+    lh+='<span style="font-size:1rem;margin-right:4px" class="'+(i>=lives?'lost':'')+'">\u25B2</span>';
+  }
   document.getElementById('hLives').innerHTML=lh;
 }
 
-/* ── update ── */
+// ── init / reset ──
+function initGame(){
+  score=0; lives=3; level=1; gameOver=false; levelClear=false; playing=true;
+  respawnTimer=0;
+  player={x:W/2, y:H-40};
+  bullet=null; eBullets=[]; particles=[]; floaters=[];
+  saucer=null; saucerTimer=600;
+  initStars(); initInvaders(); initBunkers();
+  updateHud();
+}
+
+function nextLevel(){
+  level++; levelClear=false; playing=true;
+  bullet=null; eBullets=[]; particles=[]; floaters=[];
+  saucer=null; saucerTimer=600; respawnTimer=0;
+  initInvaders(); initBunkers();
+  updateHud();
+}
+
+// ── update ──
 function update(){
-  if(!playing)return;
+  if(!playing) return;
 
-  // respawn cooldown
-  if(respawnTimer>0){respawnTimer--;return}
+  // respawn flash — player can't act but world still ticks
+  if(respawnTimer>0){
+    respawnTimer--;
+    // still move invaders and enemy bullets during respawn
+  }
 
-  // player movement
-  if(keys['ArrowLeft']||keys['tLeft'])player.x=Math.max(PLR_W/2,player.x-PLR_SPD);
-  if(keys['ArrowRight']||keys['tRight'])player.x=Math.min(W-PLR_W/2,player.x+PLR_SPD);
+  // player movement (blocked during respawn)
+  if(respawnTimer<=0){
+    if(keys.ArrowLeft||keys.tLeft) player.x = Math.max(PLR_W/2, player.x-PLR_SPD);
+    if(keys.ArrowRight||keys.tRight) player.x = Math.min(W-PLR_W/2, player.x+PLR_SPD);
 
-  // player fire
-  if((keys[' ']||keys['tFire'])&&!bullet){
-    bullet={x:player.x,y:player.y-16};
-    keys[' ']=false;keys['tFire']=false;
+    // fire
+    if((keys[' ']||keys.tFire) && !bullet){
+      bullet={x:player.x, y:player.y-16};
+      keys[' ']=false; keys.tFire=false;
+    }
   }
 
   // player bullet
   if(bullet){
-    bullet.y-=BULL_SPD;
-    if(bullet.y<0){bullet=null}
-    else{
-      // hit invader?
-      for(const inv of invaders){
-        if(!inv.alive)continue;
-        if(rectHit(bullet.x-2,bullet.y-4,4,8,inv.x,inv.y,INV_W,INV_H)){
-          inv.alive=false;score+=inv.pts;bullet=null;
-          spawnExplosion(inv.x+INV_W/2,inv.y+INV_H/2,inv.type==='squid'?CYAN:inv.type==='crab'?GREEN:YELLOW);
-          // speed up
-          const alive=invaders.filter(i=>i.alive).length;
-          invSpeed=Math.max(3,Math.max(18-level*2,4)-Math.floor((55-alive)/4));
-          if(alive===0){levelClear=true;playing=false;showLevelClear()}
-          updateHud();break;
+    bullet.y -= BULL_SPD;
+    if(bullet.y<0){ bullet=null; }
+    else {
+      // hit invader
+      for(var ii=0;ii<invaders.length;ii++){
+        var inv=invaders[ii];
+        if(!inv.alive) continue;
+        if(rectHit(bullet.x-2, bullet.y-4, 4, 8, inv.x, inv.y, INV_W, INV_H)){
+          inv.alive=false; score+=inv.pts; bullet=null;
+          spawnExplosion(inv.x+INV_W/2, inv.y+INV_H/2,
+            inv.type==='squid'?CYAN:inv.type==='crab'?GREEN:YELLOW);
+          var alive=0;
+          for(var k=0;k<invaders.length;k++) if(invaders[k].alive) alive++;
+          invSpeed = Math.max(3, Math.max(18-level*2,4) - Math.floor((55-alive)/4));
+          if(alive===0){ levelClear=true; playing=false; showLevelClear(); }
+          updateHud();
+          break;
         }
       }
-      // hit saucer?
-      if(bullet&&saucer){
-        if(rectHit(bullet.x-2,bullet.y-4,4,8,saucer.x-24,saucer.y-8,48,16)){
-          const pts=[50,100,150,200,300][Math.floor(Math.random()*5)];
-          score+=pts;spawnExplosion(saucer.x,saucer.y,RED,16);
-          spawnFloater(saucer.x,saucer.y-12,'+'+pts);
-          saucer=null;bullet=null;saucerTimer=400+Math.random()*400;
+      // hit saucer
+      if(bullet && saucer){
+        if(rectHit(bullet.x-2, bullet.y-4, 4, 8, saucer.x-24, saucer.y-8, 48, 16)){
+          var pts=[50,100,150,200,300][Math.floor(Math.random()*5)];
+          score+=pts;
+          spawnExplosion(saucer.x, saucer.y, RED, 16);
+          spawnFloater(saucer.x, saucer.y-12, '+'+pts);
+          saucer=null; bullet=null; saucerTimer=400+Math.random()*400;
           updateHud();
         }
       }
-      // hit bunker?
+      // hit bunker
       if(bullet){
-        for(const b of bunkers){
-          if(pointInBunker(b,bullet.x,bullet.y)){
-            damageBunker(b,bullet.x,bullet.y,4);bullet=null;break;
+        for(var bi=0;bi<bunkers.length;bi++){
+          if(pointInBunker(bunkers[bi], bullet.x, bullet.y)){
+            damageBunker(bunkers[bi], bullet.x, bullet.y, 4);
+            bullet=null; break;
           }
         }
       }
@@ -398,62 +420,71 @@ function update(){
   // invader movement
   invStepTimer++;
   if(invStepTimer>=invSpeed){
-    invStepTimer=0;invAnimFrame=1-invAnimFrame;
-    let hitEdge=false;
-    const alive=invaders.filter(i=>i.alive);
+    invStepTimer=0; invAnimFrame=1-invAnimFrame;
+    var aliveList=[];
+    for(var ai=0;ai<invaders.length;ai++) if(invaders[ai].alive) aliveList.push(invaders[ai]);
+
     if(invDropNext){
-      for(const inv of alive)inv.y+=12;
-      invDropNext=false;invDir*=-1;
+      for(var di=0;di<aliveList.length;di++) aliveList[di].y+=12;
+      invDropNext=false; invDir*=-1;
     } else {
-      for(const inv of alive)inv.x+=8*invDir;
-      for(const inv of alive){
-        if(inv.x+INV_W>W-10||inv.x<10)hitEdge=true;
+      var hitEdge=false;
+      for(var mi=0;mi<aliveList.length;mi++) aliveList[mi].x += 8*invDir;
+      for(var ei=0;ei<aliveList.length;ei++){
+        if(aliveList[ei].x+INV_W > W-10 || aliveList[ei].x < 10) hitEdge=true;
       }
-      if(hitEdge)invDropNext=true;
+      if(hitEdge) invDropNext=true;
     }
-    // check invaders reached player
-    for(const inv of alive){
-      if(inv.y+INV_H>=player.y-10){gameOver=true;playing=false;endGame();return}
+
+    // check if invaders reached player
+    for(var ri=0;ri<aliveList.length;ri++){
+      if(aliveList[ri].y+INV_H >= player.y-10){
+        gameOver=true; playing=false; endGame(); return;
+      }
     }
   }
 
   // enemy fire
   eFTimer--;
   if(eFTimer<=0){
-    eFTimer=eFRate+Math.floor(Math.random()*40);
-    const alive=invaders.filter(i=>i.alive);
-    if(alive.length>0){
-      // find bottom-most in each column
-      const cols={};
-      for(const inv of alive){
-        const col=Math.round(inv.x/10);
-        if(!cols[col]||inv.y>cols[col].y)cols[col]=inv;
-      }
-      const shooters=Object.values(cols);
-      const shooter=shooters[Math.floor(Math.random()*shooters.length)];
-      eBullets.push({x:shooter.x+INV_W/2,y:shooter.y+INV_H,phase:0});
+    eFTimer = eFRate + Math.floor(Math.random()*40);
+    // find bottom-most invader per column
+    var cols={};
+    for(var fi=0;fi<invaders.length;fi++){
+      var inv2=invaders[fi];
+      if(!inv2.alive) continue;
+      var col=Math.round(inv2.x/10);
+      if(!cols[col] || inv2.y>cols[col].y) cols[col]=inv2;
+    }
+    var shooters=[];
+    for(var key in cols) shooters.push(cols[key]);
+    if(shooters.length>0){
+      var shooter=shooters[Math.floor(Math.random()*shooters.length)];
+      eBullets.push({x:shooter.x+INV_W/2, y:shooter.y+INV_H, phase:0});
     }
   }
 
   // enemy bullets
-  for(let i=eBullets.length-1;i>=0;i--){
-    const eb=eBullets[i];
-    eb.y+=3.5;eb.phase++;
-    if(eb.y>H){eBullets.splice(i,1);continue}
-    // hit player?
-    if(respawnTimer<=0&&rectHit(eb.x-2,eb.y,4,8,player.x-PLR_W/2,player.y-14,PLR_W,PLR_H+14)){
-      eBullets.splice(i,1);
-      spawnExplosion(player.x,player.y,GREEN,18);
-      lives--;updateHud();
-      if(lives<=0){gameOver=true;playing=false;endGame()}
-      else{respawnTimer=90}
+  for(var ebi=eBullets.length-1;ebi>=0;ebi--){
+    var eb=eBullets[ebi];
+    eb.y+=3.5; eb.phase++;
+    if(eb.y>H){ eBullets.splice(ebi,1); continue; }
+
+    // hit player
+    if(respawnTimer<=0 && rectHit(eb.x-2, eb.y, 4, 8, player.x-PLR_W/2, player.y-14, PLR_W, PLR_H+14)){
+      eBullets.splice(ebi,1);
+      spawnExplosion(player.x, player.y, GREEN, 18);
+      lives--; updateHud();
+      if(lives<=0){ gameOver=true; playing=false; endGame(); }
+      else { respawnTimer=90; }
       continue;
     }
-    // hit bunker?
-    let bHit=false;
-    for(const b of bunkers){
-      if(pointInBunker(b,eb.x,eb.y)){
-        damageBunker(b,eb.x,eb.y,5);eBullets.splice(i,1);bHit=true;break;
+
+    // hit bunker
+    for(var bbi=0;bbi<bunkers.length;bbi++){
+      if(pointInBunker(bunkers[bbi], eb.x, eb.y)){
+        damageBunker(bunkers[bbi], eb.x, eb.y, 5);
+        eBullets.splice(ebi,1); break;
       }
     }
   }
@@ -462,150 +493,176 @@ function update(){
   if(!saucer){
     saucerTimer--;
     if(saucerTimer<=0){
-      saucerDir=Math.random()<.5?1:-1;
-      saucer={x:saucerDir===1?-30:W+30,y:30};
+      saucerDir = Math.random()<.5 ? 1 : -1;
+      saucer = {x: saucerDir===1 ? -30 : W+30, y:30};
     }
   } else {
-    saucer.x+=2*saucerDir;
-    if(saucer.x<-40||saucer.x>W+40){saucer=null;saucerTimer=400+Math.random()*400}
+    saucer.x += 2*saucerDir;
+    if(saucer.x<-40 || saucer.x>W+40){ saucer=null; saucerTimer=400+Math.random()*400; }
   }
 
   // particles
-  for(let i=particles.length-1;i>=0;i--){
-    const p=particles[i];p.x+=p.vx;p.y+=p.vy;p.life--;
-    if(p.life<=0)particles.splice(i,1);
+  for(var pi=particles.length-1;pi>=0;pi--){
+    var p=particles[pi]; p.x+=p.vx; p.y+=p.vy; p.life--;
+    if(p.life<=0) particles.splice(pi,1);
   }
   // floaters
-  for(let i=floaters.length-1;i>=0;i--){
-    floaters[i].y-=.6;floaters[i].life--;
-    if(floaters[i].life<=0)floaters.splice(i,1);
+  for(var fli=floaters.length-1;fli>=0;fli--){
+    floaters[fli].y-=.6; floaters[fli].life--;
+    if(floaters[fli].life<=0) floaters.splice(fli,1);
   }
   // stars
-  for(const s of stars){s.y+=s.sp;if(s.y>H){s.y=0;s.x=Math.random()*W}}
+  for(var si=0;si<stars.length;si++){
+    stars[si].y+=stars[si].sp;
+    if(stars[si].y>H){stars[si].y=0; stars[si].x=Math.random()*W;}
+  }
 }
 
-/* ── draw ── */
+// ── draw ──
 function draw(){
-  ctx.fillStyle=BG;ctx.fillRect(0,0,W,H);
+  ctx.fillStyle=BG; ctx.fillRect(0,0,W,H);
 
   // stars
   ctx.fillStyle='#ffffff';
-  for(const s of stars){ctx.globalAlpha=.15+s.s*.2;ctx.fillRect(s.x,s.y,s.s,s.s)}
+  for(var si=0;si<stars.length;si++){
+    var st=stars[si];
+    ctx.globalAlpha=.15+st.s*.2;
+    ctx.fillRect(st.x, st.y, st.s, st.s);
+  }
   ctx.globalAlpha=1;
 
   // bunkers
   ctx.fillStyle=GREEN;
-  for(const b of bunkers){
-    for(let r=0;r<BUNKER_ROWS;r++)for(let c=0;c<BUNKER_COLS;c++){
-      if(b.grid[r][c])ctx.fillRect(b.x+c*BUNKER_CELL,b.y+r*BUNKER_CELL,BUNKER_CELL,BUNKER_CELL);
+  for(var bi=0;bi<bunkers.length;bi++){
+    var b=bunkers[bi];
+    for(var r=0;r<BUNKER_ROWS;r++){
+      for(var c=0;c<BUNKER_COLS;c++){
+        if(b.grid[r][c]) ctx.fillRect(b.x+c*BUNKER_CELL, b.y+r*BUNKER_CELL, BUNKER_CELL, BUNKER_CELL);
+      }
     }
   }
 
   // invaders
-  for(const inv of invaders){
-    if(!inv.alive)continue;
-    drawInvader(inv.x,inv.y,inv.type,invAnimFrame);
+  for(var ii=0;ii<invaders.length;ii++){
+    var inv=invaders[ii];
+    if(inv.alive) drawInvader(inv.x, inv.y, inv.type, invAnimFrame);
   }
 
   // player
-  if(respawnTimer>0){
-    if(Math.floor(respawnTimer/6)%2===0)drawPlayer(player.x,player.y,.4);
-  } else {
-    drawPlayer(player.x,player.y,1);
+  if(playing || gameOver){
+    if(respawnTimer>0){
+      if(Math.floor(respawnTimer/6)%2===0) drawPlayer(player.x, player.y, 0.3);
+    } else {
+      drawPlayer(player.x, player.y, 1);
+    }
   }
 
   // player bullet
   if(bullet){
-    ctx.save();ctx.shadowColor=GREEN;ctx.shadowBlur=8;ctx.fillStyle=GREEN;
-    ctx.fillRect(bullet.x-1.5,bullet.y-6,3,12);
+    ctx.save(); ctx.shadowColor=GREEN; ctx.shadowBlur=8; ctx.fillStyle=GREEN;
+    ctx.fillRect(bullet.x-1.5, bullet.y-6, 3, 12);
     ctx.restore();
   }
 
-  // enemy bullets (zigzag bolts)
-  for(const eb of eBullets){
-    ctx.save();ctx.shadowColor=RED;ctx.shadowBlur=6;ctx.strokeStyle=RED;ctx.lineWidth=2;
+  // enemy bullets (zigzag)
+  for(var ebi=0;ebi<eBullets.length;ebi++){
+    var eb=eBullets[ebi];
+    ctx.save(); ctx.shadowColor=RED; ctx.shadowBlur=6; ctx.strokeStyle=RED; ctx.lineWidth=2;
     ctx.beginPath();
-    const segs=4;const segH=4;
-    for(let s=0;s<segs;s++){
-      const sy=eb.y+s*segH;
-      const zx=((s+eb.phase)%2===0)?-2:2;
-      if(s===0)ctx.moveTo(eb.x+zx,sy);else ctx.lineTo(eb.x+zx,sy);
+    for(var s=0;s<5;s++){
+      var sy=eb.y+s*3;
+      var zx=((s+eb.phase)%2===0)?-2:2;
+      if(s===0) ctx.moveTo(eb.x+zx, sy);
+      else ctx.lineTo(eb.x+zx, sy);
     }
-    ctx.stroke();ctx.restore();
+    ctx.stroke(); ctx.restore();
   }
 
   // saucer
-  if(saucer)drawSaucer(saucer.x,saucer.y);
+  if(saucer) drawSaucer(saucer.x, saucer.y);
 
   // particles
-  for(const p of particles){
-    ctx.globalAlpha=p.life/50;ctx.fillStyle=p.color;
-    ctx.fillRect(p.x-1,p.y-1,3,3);
+  for(var pi=0;pi<particles.length;pi++){
+    var pt=particles[pi];
+    ctx.globalAlpha=pt.life/50; ctx.fillStyle=pt.color;
+    ctx.fillRect(pt.x-1, pt.y-1, 3, 3);
   }
   ctx.globalAlpha=1;
 
   // floaters
-  ctx.font='bold 14px Courier New';ctx.textAlign='center';
-  for(const f of floaters){
-    ctx.globalAlpha=f.life/50;ctx.fillStyle=YELLOW;ctx.fillText(f.text,f.x,f.y);
+  ctx.font='bold 14px Courier New'; ctx.textAlign='center';
+  for(var fi=0;fi<floaters.length;fi++){
+    var f=floaters[fi];
+    ctx.globalAlpha=f.life/50; ctx.fillStyle=YELLOW;
+    ctx.fillText(f.text, f.x, f.y);
   }
   ctx.globalAlpha=1;
 
   // ground line
-  ctx.strokeStyle='#2a2a3a';ctx.lineWidth=1;
-  ctx.beginPath();ctx.moveTo(0,H-16);ctx.lineTo(W,H-16);ctx.stroke();
+  ctx.strokeStyle='#2a2a3a'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,H-16); ctx.lineTo(W,H-16); ctx.stroke();
 }
 
-/* ── game loop ── */
+// ── game loop ──
 function loop(){
-  update();draw();
+  update();
+  draw();
   requestAnimationFrame(loop);
 }
 
-/* ── overlays ── */
+// ── overlays ──
+function show(id){ document.getElementById(id).classList.remove('hidden'); }
+function hide(id){ document.getElementById(id).classList.add('hidden'); }
+
 function showLevelClear(){
   document.getElementById('lvlTitle').textContent='LEVEL '+level+' CLEAR';
-  document.getElementById('oLevel').style.display='flex';
+  show('oLevel');
 }
+
 function endGame(){
-  if(score>best){best=score;localStorage.setItem('si_best',best)}
+  if(score>best){ best=score; localStorage.setItem('si_best',''+best); }
   updateHud();
   document.getElementById('fScore').textContent='SCORE: '+score;
-  document.getElementById('oOver').style.display='flex';
+  show('oOver');
 }
 
-/* ── input ── */
-document.addEventListener('keydown',e=>{
-  if(['ArrowLeft','ArrowRight',' '].includes(e.key)){e.preventDefault();keys[e.key]=true}
+// ── input ──
+document.addEventListener('keydown', function(e){
+  if(e.key==='ArrowLeft'||e.key==='ArrowRight'||e.key===' '){
+    e.preventDefault(); keys[e.key]=true;
+  }
 });
-document.addEventListener('keyup',e=>{keys[e.key]=false});
+document.addEventListener('keyup', function(e){ keys[e.key]=false; });
 
-// touch
-function tb(id,key){
-  const el=document.getElementById(id);
-  el.addEventListener('touchstart',e=>{e.preventDefault();keys[key]=true},{passive:false});
-  el.addEventListener('touchend',e=>{e.preventDefault();keys[key]=false},{passive:false});
-  el.addEventListener('mousedown',e=>{keys[key]=true});
-  el.addEventListener('mouseup',e=>{keys[key]=false});
+function bindTouch(id,key){
+  var el=document.getElementById(id);
+  el.addEventListener('touchstart', function(e){e.preventDefault();keys[key]=true}, {passive:false});
+  el.addEventListener('touchend', function(e){e.preventDefault();keys[key]=false}, {passive:false});
+  el.addEventListener('mousedown', function(){keys[key]=true});
+  el.addEventListener('mouseup', function(){keys[key]=false});
+  el.addEventListener('mouseleave', function(){keys[key]=false});
 }
-tb('tLeft','tLeft');tb('tRight','tRight');tb('tFire','tFire');
+bindTouch('tLeft','tLeft');
+bindTouch('tRight','tRight');
+bindTouch('tFire','tFire');
 
-/* ── buttons ── */
-document.getElementById('bPlay').onclick=()=>{
-  document.getElementById('oStart').style.display='none';
-  initGame();
-};
-document.getElementById('bAgain').onclick=()=>{
-  document.getElementById('oOver').style.display='none';
-  initGame();
-};
-document.getElementById('bNext').onclick=()=>{
-  document.getElementById('oLevel').style.display='none';
-  nextLevel();
-};
+// Show on-screen controls on touch devices (incl. iPad in desktop mode).
+if(navigator.maxTouchPoints>0 || 'ontouchstart' in window){
+  document.querySelector('.touch-controls').classList.add('show');
+}
 
-/* ── boot ── */
-initStars();
+// ── buttons ──
+document.getElementById('bPlay').addEventListener('click', function(){
+  hide('oStart'); initGame();
+});
+document.getElementById('bAgain').addEventListener('click', function(){
+  hide('oOver'); initGame();
+});
+document.getElementById('bNext').addEventListener('click', function(){
+  hide('oLevel'); nextLevel();
+});
+
+// ── start loop (draws starfield behind start overlay) ──
 loop();
 
 })();
