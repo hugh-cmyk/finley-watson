@@ -855,7 +855,16 @@ function guestWillRide(g) {
   return g.cash >= ride.price;
 }
 
-function think(g, s) { g.thought = s; g.thoughtT = 3.2; }
+/* Thought bubbles are rationed park-wide, not per guest: with a crowd of
+   thirty, a small per-guest chance turns into constant chatter. One bubble
+   every several seconds reads as personality; ten a second reads as noise.
+   Urgent thoughts — sickness, wanting off — may jump a mostly-spent queue. */
+function think(g, s, urgent) {
+  if (park.thoughtCool > (urgent ? 3 : 0)) return;
+  g.thought = s;
+  g.thoughtT = 3.6;
+  park.thoughtCool = 7 + Math.random() * 7;
+}
 
 function decideTarget(g) {
   if (g.state === 'queue' || g.state === 'ride') return;
@@ -876,6 +885,8 @@ function decideTarget(g) {
 
 function stepGuests(dt) {
   var i, g;
+
+  if (park.thoughtCool > 0) park.thoughtCool -= dt;
 
   // arrivals — a better park pulls a bigger crowd
   park.spawnT -= dt;
@@ -938,12 +949,12 @@ function stepGuests(dt) {
     }
 
     // idle grumbles
-    if (g.thoughtT <= 0 && Math.random() < dt * 0.06) {
-      if (g.sick > 45) think(g, 'I FEEL SICK');
+    if (g.thoughtT <= 0 && park.thoughtCool <= 0 && Math.random() < dt * 0.012) {
+      if (g.sick > 45) think(g, 'I FEEL SICK', true);
       else if (g.happy < 40) think(g, 'THIS PARK IS RUBBISH');
       else if (!track.complete) think(g, 'THERE IS NOTHING TO RIDE');
       else if (!ride.open && ride.tested) think(g, 'WHY IS IT SHUT?');
-      else if (Math.random() < 0.3) think(g, 'WHERE IS THE LOO?');
+      else if (Math.random() < 0.35) think(g, 'WHERE IS THE LOO?');
     }
   }
 
@@ -983,10 +994,10 @@ function finishOperate() {
     g.happy = clamp(g.happy + clamp(joy, -35, 22), 0, 100);
     g.sick = clamp(g.sick + ride.nausea * 2.2 + Math.max(0, ride.intensity - 5) * 3, 0, 100);
 
-    if (ride.intensity > 8) think(g, 'I WANT TO GET OFF ' + ride.name + '!');
-    else if (g.sick > 55) think(g, 'I FEEL SICK');
-    else if (ride.excitement > 5) think(g, 'WHAT A RIDE!');
-    else if (Math.random() < 0.3) think(g, 'THAT WAS ALRIGHT');
+    if (ride.intensity > 8) think(g, 'I WANT TO GET OFF ' + ride.name + '!', true);
+    else if (g.sick > 55) think(g, 'I FEEL SICK', true);
+    else if (ride.excitement > 5 && Math.random() < 0.5) think(g, 'WHAT A RIDE!');
+    else if (Math.random() < 0.15) think(g, 'THAT WAS ALRIGHT');
 
     // step off at the station and walk away
     g.state = 'walk';
@@ -1308,7 +1319,8 @@ var park = {
   happy: 60,
   admissions: 0,
   spawnT: 2,
-  clock: 0
+  clock: 0,
+  thoughtCool: 4
 };
 var grid = [];
 
@@ -1478,7 +1490,7 @@ function newPark() {
   buildPathList();
   guests = []; queue = [];
   park.cash = 10000; park.month = 0; park.year = 1; park.admissions = 0;
-  park.happy = 60; park.spawnT = 2; park.clock = 0;
+  park.happy = 60; park.spawnT = 2; park.clock = 0; park.thoughtCool = 4;
   ride.tested = false; ride.open = false; ride.price = 2;
   ride.riders = 0; ride.takings = 0; ride.riding = [];
   sim.active = false; sim.state = 'idle'; sim.path = null;
@@ -2029,7 +2041,7 @@ function drawTerrain(g) {
 
   // thought bubbles last, so they sit above everything and each other
   var shown = 0;
-  for (var n = 0; n < guests.length && shown < 5; n++) {
+  for (var n = 0; n < guests.length && shown < 2; n++) {
     var gu = guests[n];
     if (gu.thoughtT > 0 && gu.state !== 'ride' && gu.sx !== undefined) {
       drawThought(gu, g); shown++;
