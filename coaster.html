@@ -1722,6 +1722,7 @@ var ui = {
   title: true,
   confirm: null,
   rideOpen: false,
+  drag: null,           // piece currently held by pointer
   mode: 'track',        // 'track' | 'scenery'
   scenery: 'tree',
   build: { open: true, sel: 'straight' },
@@ -2133,9 +2134,53 @@ function buildCarMap() {
   }
 }
 
+/* What you are carrying, drawn under the pointer, plus a dotted leader to the
+   spot it will actually land on. */
+function drawCarried(g) {
+  var d = ui.drag;
+  if (!d) return;
+  var tint = d.ok ? PAL.ghostOK : PAL.ghostNo;
+
+  if (d.kind === 'scenery') {
+    if (d.tile) {
+      var rx = rotX(d.tile.x, d.tile.y), ry = rotY(d.tile.x, d.tile.y);
+      var sx = (rx - ry) * HW + cam.x;
+      var sy = (rx + ry) * HH - grid[d.tile.x][d.tile.y].h * ZH + cam.y;
+      drawTileOutline(g, sx, sy, tint);
+      if (d.id !== 'clear') {
+        g.globalAlpha = 0.75;
+        drawObject(g, { type: d.id, v: 0 }, sx, sy);
+        g.globalAlpha = 1;
+      }
+    }
+    return;
+  }
+
+  // track: show the piece in hand, and where it will really go
+  var c = track.cursor;
+  var crx = rotX(c.x, c.y), cry = rotY(c.x, c.y);
+  var gx = (crx - cry) * HW + cam.x + HW;
+  var gy = (crx + cry) * HH - c.z * ZH + cam.y + HH;
+  var hx = Math.round(d.bx), hy = Math.round(d.by - 16);
+
+  var dx = gx - hx, dy = gy - hy, len = Math.hypot(dx, dy);
+  if (len > 12) {
+    g.fillStyle = tint;
+    for (var t = 0; t < len; t += 4) {
+      g.fillRect(Math.round(hx + dx * (t / len)), Math.round(hy + dy * (t / len)), 2, 2);
+    }
+  }
+
+  var spr = trackSprite(d.id, (c.d - cam.rot + 4) % 4, tint);
+  g.globalAlpha = 0.9;
+  g.drawImage(spr.c, Math.round(hx + spr.ox), Math.round(hy + spr.oy));
+  g.globalAlpha = 1;
+}
+
 /* The ghost always goes on top — it is a preview, not part of the scene. */
 function drawGhost(g) {
   if (!ui.build.open || track.complete) return;
+  if (ui.mode === 'scenery') return;
   var type = ui.build.sel, c = track.cursor;
   var why = checkPlace(type);
   var tint = why ? PAL.ghostNo : PAL.ghostOK;
@@ -2406,7 +2451,8 @@ function drawHelpWindow(g) {
     'RO   TURN THE VIEW',
     '',
     'TRACK GROWS FROM THE STATION.',
-    'TAP A PIECE TWICE TO LAY IT.',
+    'TAP A PIECE TWICE TO LAY IT,',
+    'OR DRAG IT ONTO THE PARK.',
     'GREEN GHOST FITS, RED DOES NOT.',
     'GET BACK TO THE STATION TO',
     'CLOSE THE CIRCUIT, THEN TEST IT.'
@@ -2493,6 +2539,7 @@ function render() {
   buildCarMap();
   drawTerrain(bctx);
   drawGhost(bctx);
+  drawCarried(bctx);
 
   uctx.clearRect(0, 0, uiW, uiH);
   drawUI(uctx);
@@ -2541,7 +2588,11 @@ function onDown(e) {
     if (hit) { hit.pressed = true; pointers.get(e.pointerId).btn = hit; }
   } else if (pointers.size === 2) {
     var ps = Array.from(pointers.values());
-    ps.forEach(function (p) { p.moved = true; if (p.btn) { p.btn.pressed = false; p.btn = null; } });
+    ui.drag = null;                                   // a second finger cancels a drag
+    ps.forEach(function (p) {
+      p.moved = true; p.dragging = false;
+      if (p.btn) { p.btn.pressed = false; p.btn = null; }
+    });
     pinch = {
       dist: dist(ps[0], ps[1]),
       zoom: zoomIdx,
@@ -2563,14 +2614,87 @@ function midBuf(a, b) {
   };
 }
 
+/* ── dragging a piece out of the palette ──
+   Pulling a palette button onto the park picks the piece up. Track pieces
+   still land on the end of the chain — a leader line joins the thing in your
+   hand to where it will actually go — while scenery drops on the tile under
+   the pointer. Mouse and finger take exactly the same path. */
+
+function startPieceDrag(p, b) {
+  b.pressed = false;
+  p.btn = null;
+  p.dragging = true;
+  ui.drag = {
+    pointerId: p.id,
+    kind: b.piece ? 'track' : 'scenery',
+    id: b.piece || b.scenery,
+    bx: p.bx, by: p.by, ux: 0, uy: 0, tile: null, ok: false
+  };
+  if (b.piece) { ui.mode = 'track'; ui.build.sel = b.piece; }
+  else { ui.mode = 'scenery'; ui.scenery = b.scenery; }
+  layoutUI();
+  sfxClick();
+}
+
+function updatePieceDrag(e) {
+  var d = ui.drag, b = toBuf(e), u = toUI(e);
+  d.bx = b.x; d.by = b.y; d.ux = u.x; d.uy = u.y;
+  d.overUI = pointOverUI(u.x, u.y);
+  if (d.kind === 'scenery') {
+    d.tile = d.overUI ? null : pickTile(b.x, b.y);
+    d.ok = !!d.tile && !d.overUI && sceneryFits(d.tile.x, d.tile.y);
+  } else {
+    d.ok = !d.overUI && !checkPlace(d.id);
+  }
+}
+
+function dropPiece() {
+  var d = ui.drag;
+  ui.drag = null;
+  if (!d) return;
+  if (d.overUI) { toast('DROPPED IT ON THE PARK TO BUILD'); return; }
+  if (d.kind === 'scenery') {
+    if (d.tile) placeScenery(d.tile.x, d.tile.y);
+  } else {
+    placePiece(d.id);
+  }
+}
+
+/* Would this scenery go here? Same rules placeScenery enforces. */
+function sceneryFits(x, y) {
+  var t = tileAt(x, y);
+  if (!t) return false;
+  if (ui.scenery === 'clear') return !!t.obj && t.obj.type !== 'entrance';
+  return t.t === 'grass' && !t.obj && park.cash >= SCENERY[ui.scenery].cost;
+}
+
+function pointOverUI(ux, uy) {
+  var wins = [ui.buildWin, ui.rideWin, ui.testWin, ui.rateWin, ui.helpWin, ui.camPanel];
+  for (var i = 0; i < wins.length; i++) {
+    var w = wins[i];
+    if (w && ux >= w.x && ux <= w.x + w.w && uy >= w.y && uy <= w.y + w.h) return true;
+  }
+  if (uy < 15) return true;                      // the top bar
+  return !!hitButton(ux, uy);
+}
+
 function onMove(e) {
   var p = pointers.get(e.pointerId);
   if (!p) return;
   var prevX = p.cx, prevY = p.cy;
   p.cx = e.clientX; p.cy = e.clientY;
-  if (Math.abs(p.cx - p.startX) > TAP_MOVE || Math.abs(p.cy - p.startY) > TAP_MOVE) {
-    if (!p.moved && p.btn) { p.btn.pressed = false; p.btn = null; }
+  var far = Math.abs(p.cx - p.startX) > TAP_MOVE || Math.abs(p.cy - p.startY) > TAP_MOVE;
+  if (far) {
+    // a palette button dragged off itself becomes a piece in your hand
+    if (!p.moved && p.btn && (p.btn.piece || p.btn.scenery)) startPieceDrag(p, p.btn);
+    else if (!p.moved && p.btn) { p.btn.pressed = false; p.btn = null; }
     p.moved = true;
+  }
+
+  if (p.dragging && ui.drag && ui.drag.pointerId === e.pointerId) {
+    updatePieceDrag(e);
+    e.preventDefault();
+    return;                                       // carrying a piece never pans
   }
 
   if (pointers.size >= 2 && pinch) {
@@ -2614,6 +2738,13 @@ function onUp(e) {
   if (pointers.size < 2) pinch = null;
   if (!p) return;
 
+  if (p.dragging && ui.drag && ui.drag.pointerId === e.pointerId) {
+    updatePieceDrag(e);
+    dropPiece();
+    e.preventDefault();
+    return;
+  }
+
   if (p.btn) {
     p.btn.pressed = false;
     var still = !p.moved && performance.now() - p.t < TAP_MS * 3;
@@ -2628,6 +2759,7 @@ function onUp(e) {
 function onCancel(e) {
   var p = pointers.get(e.pointerId);
   if (p && p.btn) p.btn.pressed = false;
+  if (ui.drag && ui.drag.pointerId === e.pointerId) ui.drag = null;
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
 }
