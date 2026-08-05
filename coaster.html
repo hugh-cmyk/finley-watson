@@ -1,0 +1,2749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Thrillsbury Park — Finley Watson</title>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+body{
+  display:flex;flex-direction:column;
+  background:#0a0a0f;font-family:'Courier New',Courier,monospace;color:#39ff14;
+  -webkit-font-smoothing:antialiased;
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
+  -webkit-tap-highlight-color:transparent;
+}
+a{color:#39ff14;text-decoration:none;transition:color .15s}
+a:hover{color:#fff}
+.bar{
+  flex:0 0 auto;display:flex;justify-content:space-between;align-items:baseline;
+  width:100%;gap:1rem;
+  padding:.4rem .7rem;
+  padding-top:max(.4rem,env(safe-area-inset-top));
+  font-size:.72rem;letter-spacing:.09em;
+}
+.back{opacity:.5;transition:opacity .15s}
+.back:hover{opacity:1}
+.name{opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.name b{font-weight:700;color:#ffe44d}
+#frame{
+  position:relative;flex:1 1 auto;width:100%;
+  border-top:1px solid #2a2a3a;
+  background:#16202a;
+  touch-action:none;overflow:hidden;
+}
+#view{
+  display:block;position:absolute;top:0;left:0;width:100%;height:100%;
+  image-rendering:pixelated;image-rendering:crisp-edges;
+  touch-action:none;
+}
+@media(max-width:520px){
+  .bar{font-size:.62rem;letter-spacing:.05em}
+}
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <a class="back" href="index.html">&larr; Back to games</a>
+  <span class="name"><b>THRILLSBURY PARK</b> &middot; a coaster tycoon</span>
+</div>
+
+<div id="frame">
+  <canvas id="view"></canvas>
+</div>
+
+<script>
+(function () {
+"use strict";
+
+/* ══════════════════════════════════════════════════════════════════════════
+   THRILLSBURY PARK — an RCT1-flavoured coaster builder.
+
+   Everything is drawn procedurally into a small offscreen buffer (world
+   pixels) and blitted to the display canvas at an integer scale with
+   smoothing off, so the whole thing stays crunchy and cheap on an iPad.
+
+   Phase 1 (this file): terrain, camera (pan / pinch / rotate), in-canvas
+   RCT window chrome, tile picking.
+   Later phases slot in at the marked hooks: track building, train physics,
+   ratings, guests + money, save/load.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────── constants ─────────────────────────── */
+
+var N       = 24;      // park is N×N tiles
+var HW      = 16;      // half tile width  (tiles are 32×16 diamonds)
+var HH      = 8;       // half tile height
+var ZH      = 8;       // pixels per height level
+var MAX_Z   = 8;       // highest land level
+
+var ZOOMS   = [2, 3, 4, 6, 8];   // device pixels per world pixel
+var TARGET_BUF_W = 560;          // aim for roughly this many world px across
+var MAX_BUF_PX   = 460000;       // buffer area guard (perf)
+
+var STEP    = 1 / 60;  // fixed simulation step
+var MAX_DT  = 0.1;     // clamp so a backgrounded tab doesn't fast-forward
+
+var PAL = {
+  vd:     '#16202a',   // void beyond the park
+  grassL: '#6b9e48', grassM: '#4c7a34', grassD: '#3e6329',
+  path:   '#b8a882', pathD: '#96886a', pathE: '#8c7f63',
+  water:  '#4a78b0', waterL: '#6b9ad6', waterD: '#35598a',
+  dirtL:  '#8b6b45', dirtM: '#7a5c3a', dirtD: '#5f4830',
+  rockL:  '#9a9a94', rockM: '#7d7d78', rockD: '#5e5e5a',
+  shadow: '#2e2418',
+  // cliff faces: the lower-left side of every tile is in shadow
+  fDirtR: ['#8b6b45', '#7a5c3a', '#664c30'],
+  fDirtL: ['#6b5136', '#5b452c', '#4a3823'],
+  fRockR: ['#9a9a94', '#83837d', '#6c6c67'],
+  fRockL: ['#71716d', '#5e5e5a', '#4b4b48'],
+  wood:   '#8b5a2b', woodD: '#5f3d1d', rail: '#9c9c9c',
+  railL:  '#c0c0c0', railD: '#6e6e6e', tie: '#7a5230', tieD: '#4e3320',
+  chain:  '#3f3f3f', brake: '#a83232', plat: '#9a9a94', platD: '#6c6c67',
+  post:   '#6b5136', postD: '#4a3823',
+  ghostOK: '#3fd94e', ghostNo: '#e04030',
+  leafL:  '#5aa93f', leafM: '#3e7a33', leafD: '#2f5b27',
+  ui:     '#a0a0a0', uiFace: '#b4b4b4', uiHi: '#ffffff', uiLo: '#585858',
+  uiBar:  '#6b6b6b', uiText: '#000000', uiCap: '#ffffff', uiDim: '#4a4a4a',
+  gold:   '#f0c040', bad: '#c03a2b', good: '#2f8f3a'
+};
+
+/* ─────────────────────────── small utilities ─────────────────────────── */
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function newCanvas(w, h) {
+  var c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  var g = c.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  return { c: c, g: g };
+}
+function price(n) { return '£' + n.toFixed(2); }
+function money(n) {
+  var s = Math.abs(Math.round(n)).toString(), out = '';
+  while (s.length > 3) { out = ',' + s.slice(-3) + out; s = s.slice(0, -3); }
+  return (n < 0 ? '-£' : '£') + s + out;
+}
+
+/* ─────────────────────────── bitmap text ───────────────────────────
+   A hand-drawn 5×7 monospace face. Hinted system fonts turn to mush at this
+   size, and everything here has to survive being scaled up 2–8×, so the
+   glyphs are pixels rather than outlines. Strings are rasterised once into
+   a cached canvas and then blitted. */
+
+var GW = 5, GH = 7, ADV = 6;
+var FONT = {
+  'A': '.###./#...#/#...#/#####/#...#/#...#/#...#',
+  'B': '####./#...#/#...#/####./#...#/#...#/####.',
+  'C': '.###./#...#/#..../#..../#..../#...#/.###.',
+  'D': '####./#...#/#...#/#...#/#...#/#...#/####.',
+  'E': '#####/#..../#..../####./#..../#..../#####',
+  'F': '#####/#..../#..../####./#..../#..../#....',
+  'G': '.###./#...#/#..../#.###/#...#/#...#/.####',
+  'H': '#...#/#...#/#...#/#####/#...#/#...#/#...#',
+  'I': '.###./..#../..#../..#../..#../..#../.###.',
+  'J': '..###/...#./...#./...#./...#./#..#./.##..',
+  'K': '#...#/#..#./#.#../##.../#.#../#..#./#...#',
+  'L': '#..../#..../#..../#..../#..../#..../#####',
+  'M': '#...#/##.##/#.#.#/#.#.#/#...#/#...#/#...#',
+  'N': '#...#/##..#/##..#/#.#.#/#..##/#..##/#...#',
+  'O': '.###./#...#/#...#/#...#/#...#/#...#/.###.',
+  'P': '####./#...#/#...#/####./#..../#..../#....',
+  'Q': '.###./#...#/#...#/#...#/#.#.#/#..#./.##.#',
+  'R': '####./#...#/#...#/####./#.#../#..#./#...#',
+  'S': '.####/#..../#..../.###./....#/....#/####.',
+  'T': '#####/..#../..#../..#../..#../..#../..#..',
+  'U': '#...#/#...#/#...#/#...#/#...#/#...#/.###.',
+  'V': '#...#/#...#/#...#/#...#/#...#/.#.#./..#..',
+  'W': '#...#/#...#/#...#/#.#.#/#.#.#/##.##/#...#',
+  'X': '#...#/#...#/.#.#./..#../.#.#./#...#/#...#',
+  'Y': '#...#/#...#/.#.#./..#../..#../..#../..#..',
+  'Z': '#####/....#/...#./..#../.#.../#..../#####',
+  '0': '.###./#...#/#..##/#.#.#/##..#/#...#/.###.',
+  '1': '..#../.##../..#../..#../..#../..#../.###.',
+  '2': '.###./#...#/....#/...#./..#../.#.../#####',
+  '3': '#####/...#./..#../...#./....#/#...#/.###.',
+  '4': '...#./..##./.#.#./#..#./#####/...#./...#.',
+  '5': '#####/#..../####./....#/....#/#...#/.###.',
+  '6': '..##./.#.../#..../####./#...#/#...#/.###.',
+  '7': '#####/....#/...#./..#../.#.../.#.../.#...',
+  '8': '.###./#...#/#...#/.###./#...#/#...#/.###.',
+  '9': '.###./#...#/#...#/.####/....#/...#./.##..',
+  ' ': '...../...../...../...../...../...../.....',
+  '.': '...../...../...../...../...../.##../.##..',
+  ',': '...../...../...../...../.##../.##../.#...',
+  ':': '...../.##../.##../...../.##../.##../.....',
+  '!': '..#../..#../..#../..#../..#../...../..#..',
+  '?': '.###./#...#/....#/...#./..#../...../..#..',
+  '-': '...../...../...../#####/...../...../.....',
+  '+': '...../..#../..#../#####/..#../..#../.....',
+  '/': '....#/....#/...#./..#../.#.../#..../#....',
+  '(': '...#./..#../.#.../.#.../.#.../..#../...#.',
+  ')': '.#.../..#../...#./...#./...#./..#../.#...',
+  '£': '..##./.#..#/.#.../###../.#.../.#.../####.',
+  '%': '##..#/##.#./...#./..#../.#.../#.##./#..##',
+  "'": '..#../..#../...../...../...../...../.....',
+  '*': '...../..#../#.#.#/.###./#.#.#/..#../.....',
+  '=': '...../...../#####/...../#####/...../.....',
+  '<': '...#./..#../.#.../#..../.#.../..#../...#.',
+  '>': '.#.../..#../...#./....#/...#./..#../.#...',
+  '"': '.#.#./.#.#./...../...../...../...../.....'
+};
+var GLYPH = {};
+(function bakeGlyphs() {
+  for (var ch in FONT) GLYPH[ch] = FONT[ch].split('/');
+})();
+
+var textCache = {}, textKeys = [];
+
+function renderText(str, color, sc) {
+  var key = sc + '|' + color + '|' + str;
+  var hit = textCache[key];
+  if (hit) return hit;
+
+  var w = Math.max(1, (str.length * ADV - 1) * sc), h = GH * sc;
+  var t = newCanvas(w, h);
+  t.g.fillStyle = color;
+  for (var i = 0; i < str.length; i++) {
+    var ch = str.charAt(i).toUpperCase();
+    var rows = GLYPH[ch] || GLYPH['?'];
+    if (ch === ' ') continue;
+    for (var r = 0; r < GH; r++) {
+      var row = rows[r];
+      for (var c = 0; c < GW; c++) {
+        if (row.charAt(c) === '#') t.g.fillRect((i * ADV + c) * sc, r * sc, sc, sc);
+      }
+    }
+  }
+  textCache[key] = t.c;
+  textKeys.push(key);
+  if (textKeys.length > 300) {                       // keep the cache bounded
+    for (var k = 0; k < 150; k++) delete textCache[textKeys[k]];
+    textKeys = textKeys.slice(150);
+  }
+  return t.c;
+}
+function text(g, str, x, y, color, sc) {
+  var c = renderText(str, color || PAL.uiText, sc || 1);
+  g.drawImage(c, x | 0, y | 0);
+  return c.width;
+}
+function textW(str, sc) { return Math.max(1, (str.length * ADV - 1) * (sc || 1)); }
+function textRight(g, str, right, y, color, sc) {
+  text(g, str, right - textW(str, sc), y, color, sc);
+}
+
+/* ─────────────────────────── tile sprites ───────────────────────────
+   All terrain art is generated once at load into small canvases and then
+   blitted. Diamonds are 32×16; row spans follow the classic 2:1 stair. */
+
+function diamondSpan(row) {                 // → [x0, width] for row 0..15
+  var r = row < 8 ? row : 15 - row;
+  return [14 - r * 2, 4 + r * 4];
+}
+
+var SPR = { grass: [], path: {}, water: [], tree: [], face: {}, deco: {}, track: {} };
+
+function shadeHex(hex, f) {
+  var n = parseInt(hex.slice(1), 16);
+  var r = clamp(Math.round(((n >> 16) & 255) * f), 0, 255);
+  var g = clamp(Math.round(((n >> 8) & 255) * f), 0, 255);
+  var b = clamp(Math.round((n & 255) * f), 0, 255);
+  return '#' + (1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1);
+}
+
+/* Grass gets slightly sunnier the higher it sits, which is what makes a
+   raised shelf read as raised rather than as a wall in the middle of a lawn. */
+function makeGrass(seed, tone) {
+  var f = 1 + tone * 0.11;
+  var L = shadeHex(PAL.grassL, f), M = shadeHex(PAL.grassM, f), D = shadeHex(PAL.grassD, f);
+  var t = newCanvas(32, 16), g = t.g, rnd = mulberry32(seed);
+  for (var y = 0; y < 16; y++) {
+    var sp = diamondSpan(y), x0 = sp[0], x1 = sp[0] + sp[1] - 1;
+    for (var x = x0; x <= x1; x++) {
+      var v = rnd(), col = M;
+      if (v < 0.13) col = L;
+      else if (v < 0.25) col = D;
+      // faint tile boundary so the grid reads without drawing lines
+      if ((x === x0 || x === x1) && rnd() < 0.55) col = D;
+      g.fillStyle = col;
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  return t.c;
+}
+
+/* Path tiles carry a 4-bit kerb mask of which *screen* edges are exposed:
+   1 = up-left (-ry), 2 = up-right (-rx), 4 = down-left (+ry), 8 = down-right (+rx). */
+function makePath(mask, seed) {
+  var t = newCanvas(32, 16), g = t.g, rnd = mulberry32(seed + mask * 977);
+  for (var y = 0; y < 16; y++) {
+    var sp = diamondSpan(y), x0 = sp[0], x1 = sp[0] + sp[1] - 1;
+    for (var x = x0; x <= x1; x++) {
+      var v = rnd(), col = PAL.path;
+      if (v < 0.18) col = PAL.pathD;
+      else if (v < 0.24) col = PAL.pathE;
+      g.fillStyle = col;
+      g.fillRect(x, y, 1, 1);
+    }
+    var up = y < 8;
+    var leftBit = up ? 1 : 4, rightBit = up ? 2 : 8;
+    if (mask & leftBit)  { g.fillStyle = PAL.pathE; g.fillRect(x0, y, 2, 1); }
+    if (mask & rightBit) { g.fillStyle = PAL.pathE; g.fillRect(x1 - 1, y, 2, 1); }
+  }
+  return t.c;
+}
+function pathSprite(mask) {
+  if (!SPR.path[mask]) SPR.path[mask] = makePath(mask, 4242);
+  return SPR.path[mask];
+}
+
+function makeWater(frame) {
+  var t = newCanvas(32, 16), g = t.g, rnd = mulberry32(97 + frame * 31);
+  for (var y = 0; y < 16; y++) {
+    var sp = diamondSpan(y);
+    for (var x = sp[0]; x < sp[0] + sp[1]; x++) {
+      var v = rnd(), col = PAL.water;
+      if (v < 0.10) col = PAL.waterD;
+      g.fillStyle = col;
+      g.fillRect(x, y, 1, 1);
+    }
+    // a couple of drifting highlight dashes per row
+    if ((y + frame * 3) % 5 === 0) {
+      var sp2 = diamondSpan(y), cx = sp2[0] + 3 + ((y * 7 + frame * 5) % Math.max(1, sp2[1] - 7));
+      g.fillStyle = PAL.waterL;
+      g.fillRect(cx, y, 3, 1);
+    }
+  }
+  return t.c;
+}
+
+/* Vertical cliff faces. Two per tile: 'l' hangs off the lower-left edge,
+   'r' off the lower-right. Cached per (side, depth, kind, lip). */
+function faceSprite(side, depth, kind, lip) {
+  var key = side + depth + kind + (lip ? 1 : 0);
+  if (SPR.face[key]) return SPR.face[key];
+
+  var t = newCanvas(16, depth + 9), g = t.g;
+  var rnd = mulberry32(depth * 31 + (side === 'l' ? 7 : 13) + (kind === 'rock' ? 101 : 0));
+  var pal = kind === 'rock'
+    ? (side === 'l' ? PAL.fRockL : PAL.fRockR)
+    : (side === 'l' ? PAL.fDirtL : PAL.fDirtR);
+
+  for (var i = 0; i < 16; i++) {
+    var top = side === 'l' ? (i >> 1) : (8 - ((i + 1) >> 1));
+    // vertical banding: each column keeps a base tone, so the face reads as a
+    // wall of earth rather than a field of noise
+    var base = pal[(rnd() * 3) | 0];
+    for (var d = 0; d < depth; d++) {
+      var v = rnd(), col = base;
+      if (v < 0.12) col = pal[2];
+      else if (v < 0.20) col = pal[0];
+      g.fillStyle = col;
+      g.fillRect(i, top + d, 1, 1);
+    }
+    var y = top;
+    if (lip) {                              // grass rolls over the edge...
+      g.fillStyle = side === 'l' ? PAL.grassD : PAL.grassM;
+      g.fillRect(i, y, 1, 1);
+      y += 1;
+    }
+    g.fillStyle = PAL.shadow;               // ...over a hard shadow line
+    g.fillRect(i, y, 1, 1);
+    g.fillStyle = pal[2];                   // and the base sits darker
+    g.fillRect(i, top + depth - 1, 1, 1);
+  }
+  SPR.face[key] = t.c;
+  return t.c;
+}
+
+/* ─────────────────────────── object sprites ─────────────────────────── */
+
+function makeTree(kind, seed) {
+  var rnd = mulberry32(seed);
+  if (kind === 2) {                                   // conifer
+    var t = newCanvas(18, 32), g = t.g;
+    g.fillStyle = PAL.woodD; g.fillRect(8, 25, 2, 7);
+    for (var y = 0; y < 26; y++) {
+      var w = Math.max(2, Math.round((y / 25) * 15));
+      var x0 = 9 - (w >> 1);
+      for (var x = x0; x < x0 + w; x++) {
+        var v = rnd(), col = PAL.leafD;
+        if (x - x0 < w * 0.45) col = v < 0.3 ? PAL.leafM : PAL.leafD;
+        else col = v < 0.25 ? PAL.leafM : PAL.leafD;
+        if (v < 0.08) col = PAL.leafL;
+        g.fillStyle = col; g.fillRect(x, y, 1, 1);
+      }
+    }
+    return t.c;
+  }
+  // round broadleaf
+  var big = kind === 1;
+  var W = big ? 22 : 18, H = big ? 30 : 25;
+  var t2 = newCanvas(W, H), g2 = t2.g;
+  var cx = W / 2 - 0.5, cy = big ? 11 : 9.5;
+  var rx = big ? 10 : 8, ry = big ? 10.5 : 8.5;
+  g2.fillStyle = PAL.woodD;
+  g2.fillRect(Math.round(cx) - 1, Math.round(cy + ry) - 2, 3, H - Math.round(cy + ry) + 2);
+  g2.fillStyle = PAL.wood;
+  g2.fillRect(Math.round(cx), Math.round(cy + ry) - 2, 1, H - Math.round(cy + ry) + 2);
+  for (var yy = 0; yy < H; yy++) {
+    for (var xx = 0; xx < W; xx++) {
+      var nx = (xx - cx) / rx, ny = (yy - cy) / ry;
+      var dd = nx * nx + ny * ny;
+      if (dd > 1) continue;
+      var lit = (-nx * 0.55 - ny * 0.8);            // light from the upper left
+      var v2 = rnd(), col2;
+      if (dd > 0.78) col2 = PAL.leafD;
+      else if (lit > 0.35) col2 = v2 < 0.7 ? PAL.leafL : PAL.leafM;
+      else if (lit > -0.1) col2 = v2 < 0.75 ? PAL.leafM : PAL.leafD;
+      else col2 = v2 < 0.8 ? PAL.leafD : PAL.leafM;
+      g2.fillStyle = col2;
+      g2.fillRect(xx, yy, 1, 1);
+    }
+  }
+  return t2.c;
+}
+
+function makeBench() {
+  var t = newCanvas(13, 10), g = t.g;
+  g.fillStyle = PAL.woodD;
+  g.fillRect(1, 6, 2, 4); g.fillRect(10, 6, 2, 4);
+  g.fillStyle = PAL.wood;
+  g.fillRect(0, 4, 13, 2);
+  g.fillStyle = PAL.woodD; g.fillRect(0, 6, 13, 1);
+  g.fillStyle = PAL.wood;
+  g.fillRect(1, 0, 11, 1); g.fillRect(1, 2, 11, 1);
+  g.fillStyle = PAL.woodD;
+  g.fillRect(1, 1, 11, 1); g.fillRect(1, 3, 11, 1);
+  return t.c;
+}
+function makeBin() {
+  var t = newCanvas(7, 11), g = t.g;
+  g.fillStyle = '#2f4f2f'; g.fillRect(1, 2, 5, 9);
+  g.fillStyle = '#3f6b3f'; g.fillRect(1, 2, 2, 9);
+  g.fillStyle = '#1f331f'; g.fillRect(0, 0, 7, 2);
+  return t.c;
+}
+function makeLitter(seed) {
+  var t = newCanvas(6, 4), g = t.g, rnd = mulberry32(seed);
+  for (var i = 0; i < 5; i++) {
+    g.fillStyle = rnd() < 0.5 ? '#e8e4d8' : '#c9c2ae';
+    g.fillRect((rnd() * 5) | 0, (rnd() * 3) | 0, 1, 1);
+  }
+  return t.c;
+}
+function makeEntrance() {
+  var t = newCanvas(46, 34), g = t.g;
+  function pillar(x) {
+    g.fillStyle = PAL.rockM; g.fillRect(x, 8, 9, 26);
+    g.fillStyle = PAL.rockL; g.fillRect(x, 8, 3, 26);
+    g.fillStyle = PAL.rockD;
+    for (var r = 10; r < 34; r += 4) g.fillRect(x, r, 9, 1);
+    g.fillStyle = PAL.rockL; g.fillRect(x - 1, 5, 11, 3);
+    g.fillStyle = PAL.rockD; g.fillRect(x - 1, 8, 11, 1);
+  }
+  pillar(1); pillar(36);
+  g.fillStyle = '#8b2f3a'; g.fillRect(9, 2, 28, 9);       // banner
+  g.fillStyle = '#a8404c'; g.fillRect(9, 2, 28, 3);
+  g.fillStyle = '#5e1f27'; g.fillRect(9, 10, 28, 2);
+  g.fillStyle = PAL.gold;
+  for (var x = 12; x < 35; x += 4) g.fillRect(x, 6, 2, 2); // bunting dots
+  return t.c;
+}
+
+function buildSprites() {
+  for (var tone = 0; tone < 3; tone++) {
+    SPR.grass[tone] = [];
+    for (var i = 0; i < 4; i++) SPR.grass[tone].push(makeGrass(1000 + i * 137, tone));
+  }
+  SPR.water.push(makeWater(0), makeWater(1), makeWater(2), makeWater(3));
+  SPR.tree.push(makeTree(0, 11), makeTree(1, 29), makeTree(2, 47), makeTree(0, 83));
+  SPR.deco.bench = makeBench();
+  SPR.deco.bin = makeBin();
+  SPR.deco.litter = makeLitter(5);
+  SPR.deco.entrance = makeEntrance();
+}
+
+/* ═══════════════════════════ track ═══════════════════════════
+   The coaster is an ordered chain of pieces. Each piece knows the cell,
+   height and direction it starts at; its shape is a parametric path in
+   piece-local coordinates (u forward, v right, w up in height levels).
+   That one path drives the artwork here and the physics in the next phase. */
+
+var DX = [1, 0, -1, 0], DY = [0, 1, 0, -1];   // world directions 0..3
+
+var PIECES = {
+  station:  { name: 'STATION',       cost: 0,   tiles: 4, dz: 0,  slope: 0, chain: true },
+  straight: { name: 'STRAIGHT',      cost: 30,  tiles: 1, dz: 0,  slope: 0 },
+  curveL:   { name: 'CURVE LEFT',    cost: 45,  tiles: 1, dz: 0,  slope: 0, turn: -1 },
+  curveR:   { name: 'CURVE RIGHT',   cost: 45,  tiles: 1, dz: 0,  slope: 0, turn: 1 },
+  gentleUp: { name: 'GENTLE UP',     cost: 45,  tiles: 1, dz: 1,  slope: 1 },
+  gentleDn: { name: 'GENTLE DOWN',   cost: 40,  tiles: 1, dz: -1, slope: -1 },
+  steepUp:  { name: 'STEEP UP',      cost: 65,  tiles: 1, dz: 2,  slope: 2 },
+  steepDn:  { name: 'STEEP DOWN',    cost: 55,  tiles: 1, dz: -2, slope: -2 },
+  lift:     { name: 'CHAIN LIFT',    cost: 75,  tiles: 1, dz: 1,  slope: 1, chain: true },
+  brake:    { name: 'BRAKES',        cost: 50,  tiles: 1, dz: 0,  slope: 0, brake: true },
+  loop:     { name: 'VERTICAL LOOP', cost: 280, tiles: 2, dz: 0,  slope: 0, loop: true,
+              inversion: true, top: 3.2 }
+};
+var PALETTE = ['straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
+               'steepUp', 'steepDn', 'lift', 'brake', 'loop'];
+
+var SCENERY = {
+  tree:  { name: 'TREE',  cost: 25 },
+  bench: { name: 'BENCH', cost: 15 },
+  bin:   { name: 'BIN',   cost: 12 },
+  clear: { name: 'CLEAR', cost: 0 }
+};
+var SCENERY_LIST = ['tree', 'bench', 'bin', 'clear'];
+
+var track = { pieces: [], cursor: null, complete: false, station: null };
+
+/* Piece shape. t runs 0..1 from the entry edge to the exit edge. */
+function pathFn(type) {
+  var def = PIECES[type];
+  if (def.turn) {
+    var s = def.turn;
+    return function (t) {
+      var a = t * Math.PI / 2;
+      return { u: -0.5 + 0.5 * Math.sin(a), v: s * (0.5 - 0.5 * Math.cos(a)), w: 0 };
+    };
+  }
+  if (def.loop) {
+    // A circle in the u–w plane with a forward drift, so it comes out ahead of
+    // where it went in instead of biting its own tail.
+    return function (t) {
+      if (t < 0.15) return { u: -0.5 + (t / 0.15) * 0.5, v: 0, w: 0 };
+      if (t > 0.85) return { u: 1 + ((t - 0.85) / 0.15) * 0.5, v: 0, w: 0 };
+      var phi = (t - 0.15) / 0.7 * Math.PI * 2;
+      return { u: phi / (Math.PI * 2) + 0.45 * Math.sin(phi), v: 0,
+               w: 1.6 * (1 - Math.cos(phi)) };
+    };
+  }
+  return function (t) {
+    return { u: -0.5 + t * def.tiles, v: 0, w: def.dz * t };
+  };
+}
+
+function rotUV(u, v, k) {                      // 90° steps in the ground plane
+  for (var i = 0; i < k; i++) { var t = u; u = -v; v = t; }
+  return { u: u, v: v };
+}
+
+function pieceExit(type, x, y, z, d) {
+  var def = PIECES[type];
+  if (def.turn) {
+    var nd = (d + def.turn + 4) % 4;
+    return { x: x + DX[nd], y: y + DY[nd], z: z + def.dz, d: nd };
+  }
+  return { x: x + DX[d] * def.tiles, y: y + DY[d] * def.tiles, z: z + def.dz, d: d };
+}
+
+/* Cells the piece sits in, with the height band it needs there. */
+function pieceCells(type, x, y, z, d) {
+  var def = PIECES[type], cells = [];
+  if (def.turn) return [{ x: x, y: y, z0: z, z1: z }];
+  for (var i = 0; i < def.tiles; i++) {
+    var za = z + def.dz * (i / def.tiles), zb = z + def.dz * ((i + 1) / def.tiles);
+    cells.push({
+      x: x + DX[d] * i, y: y + DY[d] * i,
+      z0: Math.min(za, zb), z1: def.top ? z + def.top : Math.max(za, zb)
+    });
+  }
+  return cells;
+}
+
+function lastSlope() {
+  var p = track.pieces[track.pieces.length - 1];
+  return p ? (PIECES[p.type].slope || 0) : 0;
+}
+
+/* Can the selected piece go on the end of the chain? Returns a reason so the
+   palette can grey itself out and say why. */
+function checkPlace(type) {
+  if (track.complete) return 'CIRCUIT IS FINISHED';
+  var def = PIECES[type], c = track.cursor;
+  if (def.cost > park.cash) return 'NOT ENOUGH MONEY';
+  if (Math.abs((def.slope || 0) - lastSlope()) > 1) return 'SLOPE CHANGES TOO FAST';
+
+  var cells = pieceCells(type, c.x, c.y, c.z, c.d);
+  for (var i = 0; i < cells.length; i++) {
+    var cell = cells[i];
+    if (cell.x < 0 || cell.y < 0 || cell.x >= N || cell.y >= N) return 'OFF THE EDGE OF THE PARK';
+    if (cell.z0 < grid[cell.x][cell.y].h) return 'THAT GOES UNDERGROUND';
+    if (cell.z1 > MAX_Z + 4) return 'TOO HIGH FOR THE PARK';
+  }
+  var ex = pieceExit(type, c.x, c.y, c.z, c.d);
+  if (ex.x < 0 || ex.y < 0 || ex.x >= N || ex.y >= N) return 'OFF THE EDGE OF THE PARK';
+
+  var s = track.station;
+  if (ex.x === s.x && ex.y === s.y) {
+    if (ex.z !== s.z || ex.d !== s.d) {
+      if (Math.abs(ex.z - s.z) <= 2) return 'RIGHT SPOT, WRONG HEIGHT OR WAY ROUND';
+    } else if ((def.slope || 0) !== 0) {
+      return 'COME INTO THE STATION ON THE FLAT';
+    }
+  }
+
+  // Overlaps: track may cross itself, but only with two levels of clearance.
+  for (var p = 0; p < track.pieces.length; p++) {
+    var pc = track.pieces[p].cells;
+    for (var a = 0; a < pc.length; a++) for (var b = 0; b < cells.length; b++) {
+      if (pc[a].x !== cells[b].x || pc[a].y !== cells[b].y) continue;
+      if (cells[b].z0 - pc[a].z1 >= 2 || pc[a].z0 - cells[b].z1 >= 2) continue;
+      // landing back on the station entry is how you finish, not a clash
+      if (p === 0 && closesCircuit(type)) continue;
+      return 'SOMETHING IS IN THE WAY';
+    }
+  }
+  return null;
+}
+
+/* The chain closes when the piece's exit lines up exactly with the station's
+   entry — same tile, same height, same direction. */
+function closesCircuit(type) {
+  var c = track.cursor, s = track.station;
+  var ex = pieceExit(type, c.x, c.y, c.z, c.d);
+  return ex.x === s.x && ex.y === s.y && ex.z === s.z && ex.d === s.d;
+}
+
+function addPiece(type, x, y, z, d) {
+  var p = { type: type, x: x, y: y, z: z, d: d, cells: pieceCells(type, x, y, z, d) };
+  track.pieces.push(p);
+  return p;
+}
+
+function placePiece(type) {
+  var why = checkPlace(type);
+  if (why) { toast(why); sfxDeny(); return false; }
+  var c = track.cursor;
+  addPiece(type, c.x, c.y, c.z, c.d);
+  park.cash -= PIECES[type].cost;
+  var closed = closesCircuit(type);
+  ride.tested = false;              // any change to the track voids the ratings
+  if (ride.open) closeRide('RIDE CLOSED FOR BUILDING');
+  track.cursor = pieceExit(type, c.x, c.y, c.z, c.d);
+  if (closed) { track.complete = true; toast('CIRCUIT COMPLETE!'); sfxGood(); } else sfxPlace();
+  layoutUI();                       // BUILD becomes TEST the moment it closes
+  return true;
+}
+
+function undoPiece() {
+  if (track.pieces.length <= 1) { toast('THE STATION STAYS PUT'); return; }
+  var p = track.pieces.pop();
+  park.cash += PIECES[p.type].cost;
+  track.cursor = { x: p.x, y: p.y, z: p.z, d: p.d };
+  track.complete = false;
+  ride.tested = false;
+  if (ride.open) closeRide('RIDE CLOSED FOR BUILDING');
+  layoutUI();
+}
+
+function initTrack() {
+  track.pieces = [];
+  track.complete = false;
+  var sx = 9, sy = 12, sz = grid[sx][sy].h, sd = 0;
+  track.station = { x: sx, y: sy, z: sz, d: sd };
+  addPiece('station', sx, sy, sz, sd);
+  track.cursor = pieceExit('station', sx, sy, sz, sd);
+}
+
+/* ─────────────────────────── track artwork ───────────────────────────
+   Each (piece, on-screen direction) is rasterised once into a canvas by
+   walking its path and plotting rails, sleepers and trimmings. Tinted
+   copies double as the build ghost. */
+
+var RAILSEP = 0.19;
+
+function trackSprite(type, sdir, tint) {
+  var key = type + '|' + sdir + '|' + (tint || '');
+  if (SPR.track[key]) return SPR.track[key];
+
+  var def = PIECES[type], f = pathFn(type);
+  var STEPS = Math.max(48, Math.round(24 * (def.tiles + 1)));
+  var ops = [];
+  // A tinted ghost keeps its structure: rails in the tint, everything else in
+  // a darker shade of it, so it still reads as track rather than a blob.
+  var tintDark = tint ? shadeHex(tint, 0.55) : null;
+  function plot(x, y, col, isRail) {
+    ops.push([Math.round(x), Math.round(y), tint ? (isRail ? tint : tintDark) : col]);
+  }
+  function proj(u, v, w) { return { x: (u - v) * HW, y: (u + v) * HH - w * ZH }; }
+
+  var samples = [];
+  for (var i = 0; i <= STEPS; i++) {
+    var t = i / STEPS, p = f(t);
+    var q = rotUV(p.u, p.v, sdir);
+    var pa = f(Math.max(0, t - 0.004)), pb = f(Math.min(1, t + 0.004));
+    var qa = rotUV(pa.u, pa.v, sdir), qb = rotUV(pb.u, pb.v, sdir);
+    var du = qb.u - qa.u, dv = qb.v - qa.v, m = Math.hypot(du, dv) || 1;
+    samples.push({ u: q.u, v: q.v, w: p.w, nu: -dv / m, nv: du / m });
+  }
+
+  // platform slabs first, so the rails sit on top of them
+  if (type === 'station') {
+    for (i = 0; i <= STEPS; i++) {
+      var s = samples[i];
+      for (var side = -1; side <= 1; side += 2) {
+        for (var o = 0.30; o <= 0.62; o += 0.06) {
+          var pp = proj(s.u + s.nu * side * o, s.v + s.nv * side * o, s.w);
+          plot(pp.x, pp.y + 1, PAL.platD);
+          plot(pp.x, pp.y, PAL.plat);
+        }
+      }
+    }
+  }
+
+  // sleepers
+  for (i = 0; i <= STEPS; i += 3) {
+    var sm = samples[i];
+    for (var k = -1; k <= 1; k += 0.25) {
+      var sp = proj(sm.u + sm.nu * RAILSEP * k, sm.v + sm.nv * RAILSEP * k, sm.w);
+      plot(sp.x, sp.y + 1, PAL.tieD);
+      plot(sp.x, sp.y, PAL.tie);
+    }
+  }
+
+  // rails
+  for (i = 0; i <= STEPS; i++) {
+    var r = samples[i];
+    for (side = -1; side <= 1; side += 2) {
+      var rp = proj(r.u + r.nu * RAILSEP * side, r.v + r.nv * RAILSEP * side, r.w);
+      plot(rp.x, rp.y + 1, PAL.railD, false);
+      plot(rp.x, rp.y, side < 0 ? PAL.railL : PAL.rail, true);
+    }
+  }
+
+  // chain dogs down the middle, brake fins across it
+  if (def.chain) {
+    for (i = 0; i <= STEPS; i += 4) {
+      var cp = proj(samples[i].u, samples[i].v, samples[i].w);
+      plot(cp.x, cp.y, PAL.chain);
+    }
+  }
+  if (def.brake) {
+    for (i = 6; i <= STEPS - 6; i += 8) {
+      var bs = samples[i];
+      for (k = -1; k <= 1; k += 0.5) {
+        var bp = proj(bs.u + bs.nu * RAILSEP * k, bs.v + bs.nv * RAILSEP * k, bs.w);
+        plot(bp.x, bp.y - 1, PAL.brake);
+        plot(bp.x, bp.y - 2, PAL.brake);
+      }
+    }
+  }
+
+  var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+  for (i = 0; i < ops.length; i++) {
+    if (ops[i][0] < minX) minX = ops[i][0];
+    if (ops[i][0] > maxX) maxX = ops[i][0];
+    if (ops[i][1] < minY) minY = ops[i][1];
+    if (ops[i][1] > maxY) maxY = ops[i][1];
+  }
+  var t2 = newCanvas(maxX - minX + 2, maxY - minY + 2), g = t2.g;
+  for (i = 0; i < ops.length; i++) {
+    g.fillStyle = ops[i][2];
+    g.fillRect(ops[i][0] - minX, ops[i][1] - minY, 1, 1);
+  }
+  var spr = { c: t2.c, ox: minX, oy: minY };
+  SPR.track[key] = spr;
+  return spr;
+}
+
+/* ═══════════════════════════ guests ═══════════════════════════
+   Guests walk the footpaths, queue at the ride entrance, ride, pay, and
+   form opinions about it. Routes come from a breadth-first search over the
+   path tiles — there are only a few dozen, so it is cheaper than it sounds
+   and much better behaved than a random walk. */
+
+var GUEST_MAX = 44, WALK_SPEED = 1.1;
+var ENTRY_TILE = { x: 11, y: 23 };
+var RIDE_ENTRANCE = { x: 11, y: 13 };
+var QUEUE_TILES = [{ x: 11, y: 13 }, { x: 11, y: 14 }, { x: 11, y: 15 }, { x: 11, y: 16 }];
+
+var guests = [], queue = [], pathList = [];
+
+var SHIRTS = ['#d84a3c', '#3d7fc4', '#e0b23c', '#5aa84f', '#a85fc4',
+              '#c96bb0', '#4fb3a8', '#e07a2f'];
+var SKINS = ['#e8c49a', '#c98f5f', '#8d5a37', '#f0d3b0'];
+
+function buildPathList() {
+  pathList = [];
+  for (var x = 0; x < N; x++) for (var y = 0; y < N; y++) {
+    if (grid[x][y].t === 'path') pathList.push(x + ',' + y);
+  }
+}
+function isPath(x, y) {
+  return x >= 0 && y >= 0 && x < N && y < N && grid[x][y].t === 'path';
+}
+
+/* Breadth-first route between two path tiles; returns a list of tiles. */
+function route(fx, fy, tx, ty) {
+  if (!isPath(fx, fy) || !isPath(tx, ty)) return null;
+  var start = fx + ',' + fy, goal = tx + ',' + ty;
+  if (start === goal) return [];
+  var prev = {}, seen = {}, q = [start];
+  seen[start] = 1;
+  while (q.length) {
+    var cur = q.shift();
+    if (cur === goal) break;
+    var p = cur.split(','), cx = +p[0], cy = +p[1];
+    for (var d = 0; d < 4; d++) {
+      var nx = cx + DX[d], ny = cy + DY[d], k = nx + ',' + ny;
+      if (!isPath(nx, ny) || seen[k]) continue;
+      seen[k] = 1; prev[k] = cur; q.push(k);
+    }
+  }
+  if (!seen[goal]) return null;
+  var out = [], node = goal;
+  while (node !== start) {
+    var pp = node.split(',');
+    out.unshift({ x: +pp[0], y: +pp[1] });
+    node = prev[node];
+  }
+  return out;
+}
+
+function spawnGuest() {
+  var rnd = Math.random;
+  var g = {
+    x: ENTRY_TILE.x, y: ENTRY_TILE.y,
+    route: null, state: 'walk', target: null,
+    happy: 55 + rnd() * 30, sick: 0,
+    cash: 6 + rnd() * 26,
+    thought: '', thoughtT: 0,
+    shirt: SHIRTS[(rnd() * SHIRTS.length) | 0],
+    skin: SKINS[(rnd() * SKINS.length) | 0],
+    anim: rnd() * 6, frame: 0,
+    visit: 110 + rnd() * 130,
+    queueT: 0
+  };
+  guests.push(g);
+  park.cash += park.entryFee;
+  park.admissions++;
+  decideTarget(g);
+  return g;
+}
+
+function wanderTarget() {
+  return pathList.length
+    ? pathList[(Math.random() * pathList.length) | 0].split(',')
+    : null;
+}
+
+function guestWillRide(g) {
+  if (!ride.open || !ride.tested || !track.complete) return false;
+  if (ride.intensity >= 10) return false;
+  if (g.sick > 55 || g.happy < 30) return false;
+  if (queue.length >= 22) return false;
+  var value = ride.excitement * 1.3 - Math.max(0, ride.intensity - 7) * 2 - ride.nausea * 0.15;
+  var most = Math.max(0.4, value * 0.85);
+  if (ride.price > most) {
+    if (Math.random() < 0.25) think(g, 'TOO DEAR!');
+    return false;
+  }
+  return g.cash >= ride.price;
+}
+
+function think(g, s) { g.thought = s; g.thoughtT = 3.2; }
+
+function decideTarget(g) {
+  if (g.state === 'queue' || g.state === 'ride') return;
+  if (guestWillRide(g)) {
+    var r = route(Math.round(g.x), Math.round(g.y), RIDE_ENTRANCE.x, RIDE_ENTRANCE.y);
+    if (r) { g.route = r; g.target = 'ride'; g.state = 'walk'; return; }
+  }
+  if (g.visit <= 0 || g.happy < 25 || g.sick > 75) {
+    var e = route(Math.round(g.x), Math.round(g.y), ENTRY_TILE.x, ENTRY_TILE.y);
+    if (e) { g.route = e; g.target = 'out'; g.state = 'leave'; return; }
+  }
+  var w = wanderTarget();
+  if (w) {
+    var rr = route(Math.round(g.x), Math.round(g.y), +w[0], +w[1]);
+    if (rr) { g.route = rr; g.target = 'wander'; g.state = 'walk'; }
+  }
+}
+
+function stepGuests(dt) {
+  var i, g;
+
+  // arrivals — a better park pulls a bigger crowd
+  park.spawnT -= dt;
+  if (park.spawnT <= 0) {
+    var pull = 1 + (ride.tested ? ride.excitement * 0.35 : 0);
+    park.spawnT = Math.max(1.2, 7 / pull);
+    if (guests.length < GUEST_MAX && park.open) spawnGuest();
+  }
+
+  for (i = guests.length - 1; i >= 0; i--) {
+    g = guests[i];
+    g.visit -= dt;
+    if (g.thoughtT > 0) g.thoughtT -= dt;
+    g.sick = Math.max(0, g.sick - dt * 0.8);
+
+    if (g.state === 'ride') continue;
+
+    if (g.state === 'queue') {
+      var idx = queue.indexOf(g);
+      var slot = QUEUE_TILES[Math.min(idx < 0 ? 0 : idx, QUEUE_TILES.length - 1)];
+      g.x += (slot.x - g.x) * Math.min(1, dt * 3);
+      g.y += (slot.y - g.y) * Math.min(1, dt * 3);
+      g.queueT += dt;
+      g.happy -= dt * 0.6;                       // queueing is nobody's idea of fun
+      if (g.queueT > 70 || !ride.open) {         // given up
+        var qi = queue.indexOf(g);
+        if (qi >= 0) queue.splice(qi, 1);
+        g.state = 'walk'; g.queueT = 0;
+        think(g, 'I HAVE BEEN QUEUEING AGES');
+        decideTarget(g);
+      }
+      continue;
+    }
+
+    // walking
+    if (!g.route || !g.route.length) {
+      if (g.state === 'leave') { guests.splice(i, 1); continue; }
+      decideTarget(g);
+      if (!g.route || !g.route.length) continue;
+    }
+    var next = g.route[0];
+    var dx = next.x - g.x, dy = next.y - g.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 0.06) {
+      g.route.shift();
+      if (!g.route.length) {
+        if (g.target === 'ride' && Math.round(g.x) === RIDE_ENTRANCE.x && Math.round(g.y) === RIDE_ENTRANCE.y) {
+          if (guestWillRide(g)) { g.state = 'queue'; g.queueT = 0; queue.push(g); }
+          else decideTarget(g);
+        } else if (g.state === 'leave') {
+          guests.splice(i, 1); continue;
+        } else decideTarget(g);
+      }
+    } else {
+      var step = Math.min(dist, WALK_SPEED * dt);
+      g.x += dx / dist * step;
+      g.y += dy / dist * step;
+      g.anim += step * 4.5;
+      g.frame = (g.anim | 0) % 2;
+    }
+
+    // idle grumbles
+    if (g.thoughtT <= 0 && Math.random() < dt * 0.06) {
+      if (g.sick > 45) think(g, 'I FEEL SICK');
+      else if (g.happy < 40) think(g, 'THIS PARK IS RUBBISH');
+      else if (!track.complete) think(g, 'THERE IS NOTHING TO RIDE');
+      else if (!ride.open && ride.tested) think(g, 'WHY IS IT SHUT?');
+      else if (Math.random() < 0.3) think(g, 'WHERE IS THE LOO?');
+    }
+  }
+
+  // average happiness, for the top bar
+  if (guests.length) {
+    var sum = 0;
+    for (i = 0; i < guests.length; i++) sum += guests[i].happy;
+    park.happy = sum / guests.length;
+  }
+
+  operateRide(dt);
+}
+
+/* Dispatching: load whoever is at the front of the queue and send them round. */
+function operateRide(dt) {
+  if (ride.dwell > 0) ride.dwell -= dt;
+  if (!ride.open || !ride.tested || !track.complete) return;
+  if (sim.active || ride.dwell > 0) return;
+  if (!queue.length) return;
+
+  var load = Math.min(queue.length, CARS * 2);
+  ride.riding = queue.splice(0, load);
+  for (var i = 0; i < ride.riding.length; i++) ride.riding[i].state = 'ride';
+  startRun('operate');
+}
+
+function finishOperate() {
+  var riders = ride.riding || [];
+  for (var i = 0; i < riders.length; i++) {
+    var g = riders[i];
+    g.cash -= ride.price;
+    park.cash += ride.price;
+    ride.takings += ride.price;
+    ride.riders++;
+
+    var joy = ride.excitement * 6 - Math.max(0, ride.intensity - 6) * 9;
+    g.happy = clamp(g.happy + clamp(joy, -35, 22), 0, 100);
+    g.sick = clamp(g.sick + ride.nausea * 2.2 + Math.max(0, ride.intensity - 5) * 3, 0, 100);
+
+    if (ride.intensity > 8) think(g, 'I WANT TO GET OFF ' + ride.name + '!');
+    else if (g.sick > 55) think(g, 'I FEEL SICK');
+    else if (ride.excitement > 5) think(g, 'WHAT A RIDE!');
+    else if (Math.random() < 0.3) think(g, 'THAT WAS ALRIGHT');
+
+    // step off at the station and walk away
+    g.state = 'walk';
+    g.x = RIDE_ENTRANCE.x; g.y = RIDE_ENTRANCE.y;
+    g.route = null;
+    decideTarget(g);
+  }
+  ride.riding = [];
+  ride.dwell = 2.5;
+}
+
+function closeRide(msg) {
+  ride.open = false;
+  var riders = ride.riding || [], i;
+  for (i = 0; i < riders.length; i++) {
+    riders[i].state = 'walk';
+    riders[i].x = RIDE_ENTRANCE.x; riders[i].y = RIDE_ENTRANCE.y;
+    riders[i].route = null;
+    think(riders[i], 'THAT WAS TERRIFYING');
+  }
+  ride.riding = [];
+  for (i = 0; i < queue.length; i++) { queue[i].state = 'walk'; queue[i].queueT = 0; }
+  queue.length = 0;
+  if (sim.mode === 'operate') { sim.active = false; sim.state = 'idle'; sim.path = null; }
+  if (msg) toast(msg);
+  layoutUI();
+}
+
+/* ═══════════════════════════ train physics ═══════════════════════════
+   The chain of pieces is flattened into one arc-length parametrised
+   polyline. Each sample carries a tangent and a parallel-transported
+   up/right frame — that frame is what makes G-forces come out right
+   through an inversion, where a naive "up is world up" falls apart. */
+
+var TILE_M = 3, LEV_M = 1.5, GRAV = 9.81;   // tuned for feel, not for realism
+var FRICTION = 0.022, DRAG = 0.0016;
+var LIFT_SPEED = 3.4, BRAKE_SPEED = 4.5, STALL_V = 0.2;
+var CARS = 4, CAR_GAP = 2.6;
+var MPH = 2.23694;
+
+var sim = {
+  active: false, state: 'idle', s: 0, v: 0, t: 0,
+  path: null, stats: null, geom: null, rollT: 0, follow: true, why: ''
+};
+
+function v3sub(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
+function v3len(a) { return Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z); }
+function v3norm(a) { var l = v3len(a) || 1; return { x: a.x / l, y: a.y / l, z: a.z / l }; }
+function v3dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+function v3cross(a, b) {
+  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
+}
+
+function buildPath() {
+  var pts = [], owner = [], i, k;
+
+  for (i = 0; i < track.pieces.length; i++) {
+    var p = track.pieces[i], def = PIECES[p.type], f = pathFn(p.type);
+    var right = (p.d + 1) % 4;
+    var M = Math.max(10, Math.round(14 * def.tiles));
+    for (k = (i === 0 ? 0 : 1); k <= M; k++) {
+      var q = f(k / M);
+      pts.push({
+        x: (p.x + q.u * DX[p.d] + q.v * DX[right]) * TILE_M,
+        y: (p.y + q.u * DY[p.d] + q.v * DY[right]) * TILE_M,
+        z: (p.z + q.w) * LEV_M
+      });
+      owner.push(i);
+    }
+  }
+
+  // arc length
+  pts[0].s = 0;
+  for (i = 1; i < pts.length; i++) pts[i].s = pts[i - 1].s + v3len(v3sub(pts[i], pts[i - 1]));
+  var len = pts[pts.length - 1].s;
+
+  // Tangents and curvature are measured over a window about as long as the
+  // train, not between adjacent samples. Pieces meet at slight kinks, and a
+  // point-sample there reads as infinite curvature — a train with a wheelbase
+  // can't feel a corner sharper than itself.
+  var HT = 0.9, HK = 1.5;
+  function idxAt(i, dist) {
+    var target = pts[i].s + dist, j = i;
+    if (dist > 0) while (j < pts.length - 1 && pts[j].s < target) j++;
+    else          while (j > 0 && pts[j].s > target) j--;
+    return j;
+  }
+  for (i = 0; i < pts.length; i++) {
+    pts[i].t = v3norm(v3sub(pts[idxAt(i, HT)], pts[idxAt(i, -HT)]));
+  }
+
+  // parallel-transported frame: carry the previous up along, re-orthogonalised
+  var up = { x: 0, y: 0, z: 1 };
+  up = v3norm(v3sub(up, mul(pts[0].t, v3dot(up, pts[0].t))));
+  if (!isFinite(up.x) || v3len(up) < 0.1) up = { x: 0, y: 0, z: 1 };
+  for (i = 0; i < pts.length; i++) {
+    var T = pts[i].t;
+    var u = v3sub(up, mul(T, v3dot(up, T)));
+    if (v3len(u) < 1e-4) u = { x: 0, y: 0, z: 1 };
+    u = v3norm(u);
+    pts[i].u = u;
+    pts[i].r = v3norm(v3cross(T, u));
+    up = u;
+  }
+
+  // curvature vector dT/ds, over the same kind of window
+  for (i = 0; i < pts.length; i++) {
+    var ia = idxAt(i, -HK), ib = idxAt(i, HK);
+    var ds = pts[ib].s - pts[ia].s;
+    pts[i].k = ds > 1e-6
+      ? { x: (pts[ib].t.x - pts[ia].t.x) / ds, y: (pts[ib].t.y - pts[ia].t.y) / ds,
+          z: (pts[ib].t.z - pts[ia].t.z) / ds }
+      : { x: 0, y: 0, z: 0 };
+  }
+
+  function mul(v, s) { return { x: v.x * s, y: v.y * s, z: v.z * s }; }
+
+  return { pts: pts, owner: owner, len: len, geom: pathGeometry(pts) };
+}
+
+/* Shape facts that don't depend on how the train runs: drops, height, length. */
+function pathGeometry(pts) {
+  var hi = -1e9, lo = 1e9, drops = [], run = 0, i;
+  for (i = 0; i < pts.length; i++) {
+    hi = Math.max(hi, pts[i].z);
+    lo = Math.min(lo, pts[i].z);
+    if (i > 0) {
+      var dz = pts[i].z - pts[i - 1].z;
+      if (dz < -0.001) run += -dz;
+      else if (run > 0) { if (run >= 1.2) drops.push(run); run = 0; }
+    }
+  }
+  if (run >= 1.2) drops.push(run);
+  var biggest = 0;
+  for (i = 0; i < drops.length; i++) biggest = Math.max(biggest, drops[i]);
+  var inversions = 0, turns = 0, kinds = {};
+  for (i = 0; i < track.pieces.length; i++) {
+    var def = PIECES[track.pieces[i].type];
+    if (def.inversion) inversions++;
+    if (def.turn) turns++;
+    kinds[track.pieces[i].type] = 1;
+  }
+  return {
+    height: hi - lo, top: hi, drops: drops, biggest: biggest,
+    inversions: inversions, turns: turns, variety: Object.keys(kinds).length,
+    length: pts[pts.length - 1].s
+  };
+}
+
+/* ─────────────────────────── ratings ───────────────────────────
+   Three numbers in the RCT mould. The weights are picked so that a first
+   coaster lands around 3, and something with a real drop and a loop gets
+   into the 6s — and so that intensity runs away from you if you build
+   nothing but tight corners, which is the feedback loop worth having. */
+
+var ride = {
+  name: 'THRILLSBURY COASTER',
+  tested: false, excitement: 0, intensity: 0, nausea: 0,
+  stats: null, geom: null,
+  open: false, price: 2, riders: 0, takings: 0, dwell: 0, riding: []
+};
+
+function band(v) {
+  if (v < 1) return 'VERY LOW';
+  if (v < 2) return 'LOW';
+  if (v < 4) return 'MEDIUM';
+  if (v < 6) return 'HIGH';
+  if (v < 8) return 'VERY HIGH';
+  if (v < 10) return 'EXTREME';
+  return 'ULTRA EXTREME';
+}
+function rateText(v) { return v.toFixed(2) + ' (' + band(v) + ')'; }
+
+function computeRatings() {
+  var g = sim.geom, s = sim.stats, mph = s.top * MPH;
+
+  var ex = 0.5
+    + g.drops.length * 0.22
+    + g.biggest * 0.10
+    + mph * 0.055
+    + s.air * 0.9
+    + g.inversions * 0.9
+    + g.variety * 0.18
+    + g.length / 100 * 0.5;
+
+  // Every curve here has a one-tile radius, so even a sedate coaster pulls
+  // several lateral G. The scale is therefore calibrated against what this
+  // game can actually build: a first circuit lands about 4, a loop-and-drops
+  // monster gets into the 9s, and only genuinely reckless track passes 10.
+  var vG = Math.min(s.maxG, 7), lG = Math.min(s.maxLat, 7);
+
+  var inten = vG * 0.55
+    + lG * 0.55
+    + mph * 0.045
+    + g.inversions * 0.6
+    + g.drops.length * 0.15;
+
+  var nau = lG * 0.6
+    + g.turns * 0.22
+    + g.inversions * 1.1
+    + Math.max(0, s.maxG - 3.5) * 0.5;
+
+  if (g.length < 30) ex *= 0.7;              // a lap round the car park
+  if (inten > 10) ex *= 0.35;                // nobody sane is getting on
+  if (nau > 6) ex *= 0.85;
+
+  ride.excitement = Math.max(0, ex);
+  ride.intensity = Math.max(0, inten);
+  ride.nausea = Math.max(0, nau);
+  ride.stats = s;
+  ride.geom = g;
+  ride.tested = true;
+}
+
+function sampleAt(s) {
+  var P = sim.path, L = P.len, pts = P.pts;
+  s = ((s % L) + L) % L;
+  var lo = 0, hi = pts.length - 1;
+  while (lo < hi - 1) {                       // binary search on arc length
+    var mid = (lo + hi) >> 1;
+    if (pts[mid].s <= s) lo = mid; else hi = mid;
+  }
+  var a = pts[lo], b = pts[Math.min(lo + 1, pts.length - 1)];
+  var span = (b.s - a.s) || 1, f = clamp((s - a.s) / span, 0, 1);
+  return {
+    x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, z: a.z + (b.z - a.z) * f,
+    t: a.t, u: a.u, r: a.r, k: a.k, owner: P.owner[lo]
+  };
+}
+
+function startRun(mode) {
+  if (!track.complete) { toast('CLOSE THE CIRCUIT FIRST'); return; }
+  sim.mode = mode || 'test';
+  sim.path = buildPath();
+  sim.geom = sim.path.geom;
+  sim.active = true;
+  sim.state = 'running';
+  sim.s = 0.01; sim.v = LIFT_SPEED; sim.t = 0; sim.rollT = 0;
+  sim.follow = sim.mode === 'test';
+  sim.why = '';
+  sim.stats = { top: 0, maxG: -99, minG: 99, maxLat: 0, air: 0, time: 0 };
+  layoutUI();
+}
+function startTest() { startRun('test'); }
+function stopTest() {
+  sim.active = false; sim.state = 'idle'; sim.path = null;
+  layoutUI();
+}
+
+function forcesAt(st, v) {
+  var f = { x: st.k.x * v * v, y: st.k.y * v * v, z: st.k.z * v * v + GRAV };
+  return { vert: v3dot(f, st.u) / GRAV, lat: v3dot(f, st.r) / GRAV };
+}
+
+function stepSim(dt) {
+  if (sim.state !== 'running') return;
+  var st = sampleAt(sim.s);
+  var def = PIECES[track.pieces[st.owner].type];
+
+  var a = -GRAV * st.t.z - FRICTION * sim.v - DRAG * sim.v * Math.abs(sim.v);
+  if (def.brake && sim.v > BRAKE_SPEED) a -= 7;
+  sim.v += a * dt;
+  // The chain only pulls a train that is still going forwards. Otherwise a
+  // coaster that can't climb its first hill shuffles back and forth for ever
+  // instead of failing.
+  if (def.chain && sim.v >= 0 && sim.v < LIFT_SPEED) sim.v = LIFT_SPEED;
+  sim.s += sim.v * dt;
+  sim.t += dt;
+
+  var g = forcesAt(st, sim.v), s = sim.stats;
+  s.time = sim.t;
+  s.top = Math.max(s.top, sim.v);
+  s.maxG = Math.max(s.maxG, g.vert);
+  s.minG = Math.min(s.minG, g.vert);
+  s.maxLat = Math.max(s.maxLat, Math.abs(g.lat));
+  if (g.vert < 0.2) s.air += dt;
+
+  // stalling: rolling backwards fails fast, crawling fails slowly
+  if (sim.v < -0.3) sim.rollT += dt * 2.5;
+  else if (!def.chain && sim.v < STALL_V) sim.rollT += dt;
+  else sim.rollT = 0;
+  if (sim.rollT > 0.8) {
+    sim.state = 'stalled';
+    sim.why = sim.v < 0 ? 'IT ROLLED BACK' : 'THE TRAIN STALLED';
+    sfxBad();
+    if (sim.mode === 'operate') { closeRide('THE RIDE HAS BROKEN DOWN'); return; }
+    toast('THE TRAIN HAS STALLED!');
+  }
+  if (sim.s >= sim.path.len) {
+    sim.s = sim.path.len;
+    sim.state = 'done';
+    sim.why = 'COMPLETED THE LAP';
+    if (sim.mode === 'operate') {
+      sim.active = false; sim.state = 'idle';
+      finishOperate();
+      return;
+    }
+    computeRatings();
+    saveBest();
+    saveGame();
+    sfxGood();
+    toast('EXCITEMENT ' + rateText(ride.excitement));
+  }
+  if (sim.state !== 'running') layoutUI();
+}
+
+/* ─────────────────────────── park state ───────────────────────────
+   grid[x][y] = { h, t, obj }.  Everything the park needs to be rebuilt
+   lives here (phase 6 serialises it to localStorage). */
+
+var park = {
+  name: 'THRILLSBURY PARK',
+  cash: 10000,
+  guests: 0,
+  month: 0,
+  year: 1,
+  entryFee: 5,
+  open: true,
+  happy: 60,
+  admissions: 0,
+  spawnT: 2,
+  clock: 0
+};
+var grid = [];
+
+function tileAt(x, y) {
+  return (x < 0 || y < 0 || x >= N || y >= N) ? null : grid[x][y];
+}
+
+function generatePark() {
+  var rnd = mulberry32(20260805), x, y;
+
+  grid = [];
+  for (x = 0; x < N; x++) {
+    grid[x] = [];
+    for (y = 0; y < N; y++) grid[x][y] = { h: 1, t: 'grass', obj: null };
+  }
+
+  // a sunken pond in the south-west
+  for (x = 0; x < N; x++) for (y = 0; y < N; y++) {
+    var dx = (x - 3) / 2.9, dy = (y - 19) / 2.2;
+    if (dx * dx + dy * dy < 1) { grid[x][y].h = 0; grid[x][y].t = 'water'; }
+  }
+
+  // a raised shelf in the north-east — somewhere for a first big drop
+  function raise(x0, y0, x1, y1, h) {
+    for (var a = x0; a <= x1; a++) for (var b = y0; b <= y1; b++) grid[a][b].h = h;
+  }
+  raise(18, 3, 21, 9, 2);
+  raise(19, 4, 21, 8, 3);
+
+  // path: a loop around the middle plus a spur down to the park entrance
+  function pave(x, y) { var t = tileAt(x, y); if (t && t.t !== 'water') t.t = 'path'; }
+  for (var i = 6; i <= 17; i++) { pave(i, 6); pave(i, 17); pave(6, i); pave(17, i); }
+  for (y = 18; y <= 23; y++) pave(11, y);
+  for (y = 13; y <= 16; y++) pave(11, y);        // queue spur up to the station
+  grid[11][23].obj = { type: 'entrance' };
+
+  function nearPath(x, y) {
+    for (var a = -1; a <= 1; a++) for (var b = -1; b <= 1; b++) {
+      var t = tileAt(x + a, y + b);
+      if (t && t.t === 'path') return true;
+    }
+    return false;
+  }
+
+  // Trees: a thin scatter, denser round the edges of the park so the middle
+  // stays open for building. Never adjacent to another tree or to a path.
+  function hasTreeNear(x, y) {
+    for (var a = -1; a <= 1; a++) for (var b = -1; b <= 1; b++) {
+      var t = tileAt(x + a, y + b);
+      if (t && t.obj && t.obj.type === 'tree') return true;
+    }
+    return false;
+  }
+  var planted = 0;
+  for (var n = 0; n < 700 && planted < 52; n++) {
+    x = (rnd() * N) | 0; y = (rnd() * N) | 0;
+    var t2 = grid[x][y];
+    if (t2.t !== 'grass' || t2.obj || nearPath(x, y) || hasTreeNear(x, y)) continue;
+    var edge = Math.min(x, y, N - 1 - x, N - 1 - y);       // 0 at the boundary
+    if (rnd() > 0.30 + (6 - Math.min(6, edge)) * 0.11) continue;
+    t2.obj = { type: 'tree', v: (rnd() * SPR.tree.length) | 0 };
+    planted++;
+  }
+
+  // benches and bins on the grass alongside the loop
+  var spots = [[7, 5], [12, 5], [16, 5], [5, 10], [5, 15], [18, 9], [18, 14], [9, 18], [14, 18], [7, 12]];
+  for (var s = 0; s < spots.length; s++) {
+    var t3 = tileAt(spots[s][0], spots[s][1]);
+    if (t3 && t3.t === 'grass') t3.obj = { type: s % 3 === 2 ? 'bin' : 'bench' };
+  }
+  // a little litter, because guests are animals
+  var litter = [[9, 6], [14, 17], [6, 12], [11, 20], [17, 9]];
+  for (var l = 0; l < litter.length; l++) {
+    var t4 = tileAt(litter[l][0], litter[l][1]);
+    if (t4 && t4.t === 'path' && !t4.obj) t4.obj = { type: 'litter' };
+  }
+}
+
+/* ═══════════════════════════ save / load ═══════════════════════════
+   The park is the terrain edits, the track chain and the money. Guests are
+   deliberately not saved — they wander off when you close the tab, which is
+   both simpler and true to life. */
+
+var SAVE_KEY = 'finley-coaster-park', BEST_KEY = 'finley-coaster-best';
+var best = 0, saveT = 0;
+
+function loadBest() {
+  try { best = parseFloat(localStorage.getItem(BEST_KEY)) || 0; } catch (e) { best = 0; }
+}
+function saveBest() {
+  if (ride.excitement <= best) return;
+  best = ride.excitement;
+  try { localStorage.setItem(BEST_KEY, String(best)); } catch (e) {}
+}
+
+function serialise() {
+  var terrain = [], objs = [];
+  for (var x = 0; x < N; x++) for (var y = 0; y < N; y++) {
+    var t = grid[x][y];
+    terrain.push(t.h + (t.t === 'path' ? 100 : t.t === 'water' ? 200 : 0));
+    if (t.obj) objs.push([x, y, t.obj.type, t.obj.v || 0]);
+  }
+  var pieces = [];
+  for (var i = 0; i < track.pieces.length; i++) {
+    var p = track.pieces[i];
+    pieces.push([p.type, p.x, p.y, p.z, p.d]);
+  }
+  return {
+    v: 1, terrain: terrain, objs: objs, pieces: pieces,
+    cash: park.cash, month: park.month, year: park.year, admissions: park.admissions,
+    price: ride.price, riders: ride.riders, takings: ride.takings,
+    tested: ride.tested, exc: ride.excitement, inten: ride.intensity, nau: ride.nausea,
+    open: ride.open
+  };
+}
+
+function saveGame() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(serialise())); } catch (e) {}
+}
+
+function loadGame() {
+  var raw;
+  try { raw = localStorage.getItem(SAVE_KEY); } catch (e) { return false; }
+  if (!raw) return false;
+  var d;
+  try { d = JSON.parse(raw); } catch (e) { return false; }
+  if (!d || d.v !== 1 || !d.terrain || d.terrain.length !== N * N) return false;
+
+  var i = 0, x, y;
+  for (x = 0; x < N; x++) for (y = 0; y < N; y++) {
+    var code = d.terrain[i++];
+    var kind = code >= 200 ? 'water' : code >= 100 ? 'path' : 'grass';
+    grid[x][y] = { h: code % 100, t: kind, obj: null };
+  }
+  for (i = 0; i < d.objs.length; i++) {
+    var o = d.objs[i];
+    if (o[0] < N && o[1] < N) grid[o[0]][o[1]].obj = { type: o[2], v: o[3] };
+  }
+
+  track.pieces = []; track.complete = false;
+  var st = d.pieces && d.pieces[0];
+  if (!st) return false;
+  track.station = { x: st[1], y: st[2], z: st[3], d: st[4] };
+  for (i = 0; i < d.pieces.length; i++) {
+    var p = d.pieces[i];
+    addPiece(p[0], p[1], p[2], p[3], p[4]);
+  }
+  var last = d.pieces[d.pieces.length - 1];
+  track.cursor = pieceExit(last[0], last[1], last[2], last[3], last[4]);
+  track.complete = track.cursor.x === track.station.x && track.cursor.y === track.station.y &&
+                   track.cursor.z === track.station.z && track.cursor.d === track.station.d;
+
+  park.cash = d.cash; park.month = d.month || 0; park.year = d.year || 1;
+  park.admissions = d.admissions || 0;
+  ride.price = d.price === undefined ? 2 : d.price;
+  ride.riders = d.riders || 0; ride.takings = d.takings || 0;
+  ride.tested = !!d.tested;
+  ride.excitement = d.exc || 0; ride.intensity = d.inten || 0; ride.nausea = d.nau || 0;
+  ride.open = !!d.open && ride.tested;
+  buildPathList();
+  return true;
+}
+
+function newPark() {
+  generatePark();
+  initTrack();
+  buildPathList();
+  guests = []; queue = [];
+  park.cash = 10000; park.month = 0; park.year = 1; park.admissions = 0;
+  park.happy = 60; park.spawnT = 2; park.clock = 0;
+  ride.tested = false; ride.open = false; ride.price = 2;
+  ride.riders = 0; ride.takings = 0; ride.riding = [];
+  sim.active = false; sim.state = 'idle'; sim.path = null;
+  saveGame();
+  centreOn(11, 11);
+  layoutUI();
+}
+
+/* ═══════════════════════════ sound ═══════════════════════════
+   A few WebAudio blips. The context is created on the first touch, because
+   iOS will not let it start any other way. */
+
+var actx = null, muted = false;
+function initAudio() {
+  if (actx || muted) return;
+  try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; }
+}
+function blip(freq, len, type, vol) {
+  if (!actx || muted) return;
+  try {
+    var o = actx.createOscillator(), g = actx.createGain();
+    o.type = type || 'square';
+    o.frequency.value = freq;
+    g.gain.value = vol === undefined ? 0.05 : vol;
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + len);
+    o.connect(g); g.connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + len);
+  } catch (e) {}
+}
+function sfxClick() { blip(420, 0.05, 'square', 0.04); }
+function sfxPlace() { blip(620, 0.07, 'square', 0.05); }
+function sfxDeny()  { blip(150, 0.12, 'sawtooth', 0.05); }
+function sfxGood()  { blip(660, 0.09, 'square', 0.05); setTimeout(function () { blip(880, 0.12, 'square', 0.05); }, 90); }
+function sfxBad()   { blip(220, 0.18, 'sawtooth', 0.06); }
+
+/* ─────────────────────────── camera ───────────────────────────
+   cam.x / cam.y are buffer-pixel offsets; cam.rot is one of 4 view
+   orientations, applied as a coordinate swap before projection. */
+
+var cam = { x: 0, y: 0, rot: 0 };
+var zoomIdx = 2, scale = 4, dpr = 1;
+var bufW = 0, bufH = 0;
+
+function rotX(x, y) {
+  switch (cam.rot) {
+    case 1: return y;
+    case 2: return N - 1 - x;
+    case 3: return N - 1 - y;
+  }
+  return x;
+}
+function rotY(x, y) {
+  switch (cam.rot) {
+    case 1: return N - 1 - x;
+    case 2: return N - 1 - y;
+    case 3: return x;
+  }
+  return y;
+}
+function unrot(rx, ry) {
+  switch (cam.rot) {
+    case 1: return { x: N - 1 - ry, y: rx };
+    case 2: return { x: N - 1 - rx, y: N - 1 - ry };
+    case 3: return { x: ry, y: N - 1 - rx };
+  }
+  return { x: rx, y: ry };
+}
+
+function projRX(rx, ry, z) { return (rx - ry) * HW + cam.x; }
+function projRY(rx, ry, z) { return (rx + ry) * HH - z * ZH + cam.y; }
+
+/* screen (buffer px) → tile, testing from the top level down so raised
+   land picks correctly. Returns {x,y} or null. */
+function pickTile(bx, by) {
+  for (var z = MAX_Z; z >= 0; z--) {
+    var u = bx - cam.x, v = by - cam.y + z * ZH;
+    var rx = Math.floor(u / (2 * HW) + v / (2 * HH));
+    var ry = Math.floor(v / (2 * HH) - u / (2 * HW));
+    if (rx < 0 || ry < 0 || rx >= N || ry >= N) continue;
+    var w = unrot(rx, ry);
+    if (grid[w.x][w.y].h === z) return w;
+  }
+  return null;
+}
+
+function centreOn(x, y) {
+  var rx = rotX(x, y), ry = rotY(x, y), z = grid[x][y].h;
+  cam.x = bufW / 2 - (rx - ry) * HW;
+  cam.y = bufH / 2 - ((rx + ry) * HH - z * ZH);
+  clampCam();
+}
+/* Any corner of the park can be dragged as far as the middle of the screen,
+   and no further — so you can always reach everything, and never lose the
+   park off the edge. Rotation-independent, because it works off the centre. */
+function clampCam() {
+  var halfW = (N - 1) * HW, halfH = (N - 1) * HH;
+  var restX = bufW / 2, restY = bufH / 2 - halfH;   // camera with park centred
+  cam.x = clamp(cam.x, restX - halfW, restX + halfW);
+  cam.y = clamp(cam.y, restY - halfH, restY + halfH);
+}
+
+/* ─────────────────────────── canvas / sizing ─────────────────────────── */
+
+var frameEl = document.getElementById('frame');
+var disp = document.getElementById('view');
+var dctx = disp.getContext('2d');
+var buf = newCanvas(64, 64), bctx = buf.g;      // world, drawn at `scale`
+var uibuf = newCanvas(64, 64), uctx = uibuf.g;  // chrome, drawn at `uiScale`
+var uiScale = 2, uiW = 64, uiH = 64;            // UI pixels are zoom-independent
+var sized = false;
+
+function chooseDefaultZoom(deviceW) {
+  var best = 0, bestErr = Infinity;
+  for (var i = 0; i < ZOOMS.length; i++) {
+    var err = Math.abs(deviceW / ZOOMS[i] - TARGET_BUF_W);
+    if (err < bestErr) { bestErr = err; best = i; }
+  }
+  return best;
+}
+
+function resize() {
+  var r = frameEl.getBoundingClientRect();
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  var dw = Math.max(64, Math.round(r.width * dpr));
+  var dh = Math.max(64, Math.round(r.height * dpr));
+
+  if (!sized) { zoomIdx = chooseDefaultZoom(dw); sized = true; }
+
+  scale = ZOOMS[zoomIdx];
+  while ((dw / scale) * (dh / scale) > MAX_BUF_PX && zoomIdx < ZOOMS.length - 1) {
+    zoomIdx++; scale = ZOOMS[zoomIdx];
+  }
+
+  var oldW = bufW, oldH = bufH;
+  bufW = Math.max(64, Math.ceil(dw / scale));
+  bufH = Math.max(64, Math.ceil(dh / scale));
+
+  buf.c.width = bufW; buf.c.height = bufH;
+  bctx = buf.c.getContext('2d');
+  bctx.imageSmoothingEnabled = false;
+
+  // Chrome sits on its own layer at a fixed scale, so windows and buttons stay
+  // the same size on screen however far the world is zoomed in.
+  uiScale = clamp(Math.round(dpr * 2), 2, 4);
+  // on a narrow screen, drop to smaller UI pixels so the windows still fit
+  // side by side (hit areas are padded back up to 44 CSS px regardless)
+  uiScale = Math.max(2, Math.min(uiScale, Math.floor(dw / 260)));
+  uiW = Math.max(64, Math.ceil(dw / uiScale));
+  uiH = Math.max(64, Math.ceil(dh / uiScale));
+  uibuf.c.width = uiW; uibuf.c.height = uiH;
+  uctx = uibuf.c.getContext('2d');
+  uctx.imageSmoothingEnabled = false;
+
+  disp.width = dw; disp.height = dh;
+  dctx = disp.getContext('2d');
+  dctx.imageSmoothingEnabled = false;
+
+  if (oldW) { cam.x += (bufW - oldW) / 2; cam.y += (bufH - oldH) / 2; }
+  clampCam();
+  layoutUI();
+}
+
+/* Zoom about a fixed anchor given in buffer coords, so the world point under
+   a finger or cursor stays put. */
+function setZoom(idx, anchorBX, anchorBY) {
+  idx = clamp(idx, 0, ZOOMS.length - 1);
+  if (idx === zoomIdx) return;
+  var ax = anchorBX === undefined ? bufW / 2 : anchorBX;
+  var ay = anchorBY === undefined ? bufH / 2 : anchorBY;
+  var worldX = ax - cam.x, worldY = ay - cam.y;   // projection-space point
+  var frac = { x: ax / bufW, y: ay / bufH };
+
+  zoomIdx = idx;
+  resize();
+
+  cam.x = frac.x * bufW - worldX;
+  cam.y = frac.y * bufH - worldY;
+  clampCam();
+}
+
+function rotate(dir) {
+  var c = pickTile(bufW / 2, bufH / 2) || { x: (N / 2) | 0, y: (N / 2) | 0 };
+  cam.rot = (cam.rot + dir + 4) % 4;
+  centreOn(c.x, c.y);
+}
+
+/* ─────────────────────────── in-canvas RCT chrome ─────────────────────────── */
+
+function bevel(g, x, y, w, h, inset) {
+  g.fillStyle = inset ? PAL.uiLo : PAL.uiHi;
+  g.fillRect(x, y, w, 1); g.fillRect(x, y, 1, h);
+  g.fillStyle = inset ? PAL.uiHi : PAL.uiLo;
+  g.fillRect(x, y + h - 1, w, 1); g.fillRect(x + w - 1, y, 1, h);
+}
+function panel(g, x, y, w, h) {
+  g.fillStyle = PAL.ui; g.fillRect(x, y, w, h);
+  bevel(g, x, y, w, h, false);
+}
+function windowFrame(g, x, y, w, h, title) {
+  g.fillStyle = PAL.uiBar; g.fillRect(x, y, w, 13);
+  bevel(g, x, y, w, 13, false);
+  text(g, title, x + 4, y + 3, PAL.uiCap);
+  g.fillStyle = PAL.ui; g.fillRect(x, y + 13, w, h - 13);
+  bevel(g, x, y + 13, w, h - 13, false);
+}
+function drawButton(g, b) {
+  var down = !!b.pressed, sunk = down || b.on;
+  g.fillStyle = down ? '#8e8e8e' : (b.on ? '#c8c8c8' : PAL.uiFace);
+  g.fillRect(b.x, b.y, b.w, b.h);
+  bevel(g, b.x, b.y, b.w, b.h, sunk);
+  var ox = down ? 1 : 0;
+  var ink = b.disabled ? '#7d7d7d' : PAL.uiText;
+  if (b.piece) drawPieceIcon(g, b.piece, b.x + ox, b.y + ox, ink);
+  if (b.label) {
+    var tw = textW(b.label);
+    text(g, b.label, b.x + ((b.w - tw) >> 1) + ox, b.y + ((b.h - GH) >> 1) + ox, ink);
+  }
+}
+
+/* Buttons are hit-tested in world (buffer) pixels, padded out so that every
+   one is at least 44 CSS px in each direction however far we're zoomed out. */
+var buttons = [];
+function hitPad(size) {
+  var k = uiScale / dpr;                     // CSS px per UI px
+  return Math.max(0, (44 - size * k) / 2 / k);
+}
+function hitButton(bx, by) {
+  for (var i = 0; i < buttons.length; i++) {
+    var b = buttons[i];
+    var px = hitPad(b.w), py = hitPad(b.h);
+    if (bx >= b.x - px && bx <= b.x + b.w + px && by >= b.y - py && by <= b.y + b.h + py) return b;
+  }
+  return null;
+}
+
+/* ─────────────────────────── UI state + layout ─────────────────────────── */
+
+var ui = {
+  selected: null,       // last tapped tile {x,y}
+  showHelp: false,
+  title: true,
+  confirm: null,
+  rideOpen: false,
+  mode: 'track',        // 'track' | 'scenery'
+  scenery: 'tree',
+  build: { open: true, sel: 'straight' },
+  toast: '',
+  toastT: 0,
+  waterFrame: 0,
+  waterT: 0
+};
+
+function toast(msg) { ui.toast = msg; ui.toastT = 3; }
+
+function layoutUI() {
+  buttons = [];
+  var B = 22, H = 20, gap = 2;
+  var right = uiW - 4, bottom = uiH - 4;
+
+  if (ui.confirm) {
+    var cw = 150, ch = 60;
+    var ccx = (uiW - cw) >> 1, ccy = Math.max(20, (uiH - ch) >> 1);
+    ui.confirmWin = { x: ccx, y: ccy, w: cw, h: ch };
+    buttons.push({ id: 'yes', x: ccx + 8,  y: ccy + ch - 24, w: 60, h: 18, label: 'YES' });
+    buttons.push({ id: 'no',  x: ccx + 78, y: ccy + ch - 24, w: 60, h: 18, label: 'NO' });
+    return;
+  }
+  if (ui.title) {
+    var tw2 = Math.min(uiW - 20, 210), th2 = 96;
+    var tx2 = (uiW - tw2) >> 1, ty2 = Math.max(16, (uiH - th2) >> 1);
+    ui.titleWin = { x: tx2, y: ty2, w: tw2, h: th2 };
+    buttons.push({ id: 'play', x: tx2 + 10, y: ty2 + th2 - 26, w: 74, h: 20, label: 'PLAY' });
+    buttons.push({ id: 'newpark', x: tx2 + 92, y: ty2 + th2 - 26, w: 74, h: 20, label: 'NEW PARK' });
+    return;
+  }
+
+  // camera cluster, bottom right
+  var cw = B * 3 + gap * 2 + 6, ch = H + 6;
+  var cx = right - cw, cy = bottom - ch;
+  buttons.push({ id: 'zoomout', x: cx + 3,                 y: cy + 3, w: B, h: H, label: '-' });
+  buttons.push({ id: 'zoomin',  x: cx + 3 + B + gap,       y: cy + 3, w: B, h: H, label: '+' });
+  buttons.push({ id: 'rotate',  x: cx + 3 + (B + gap) * 2, y: cy + 3, w: B, h: H, label: 'RO' });
+  ui.camPanel = { x: cx, y: cy, w: cw, h: ch };
+
+  // help doubles as the menu: sound and starting a new park live in it
+  if (ui.showHelp) {
+    var hw = Math.min(uiW - 16, 210), hh = 132;
+    var hx = (uiW - hw) >> 1, hy = Math.max(20, (uiH - hh) >> 1);
+    ui.helpWin = { x: hx, y: hy, w: hw, h: hh };
+    buttons.push({ id: 'sound', x: hx + 6, y: hy + hh - 24, w: 70, h: 18,
+                   label: muted ? 'SOUND OFF' : 'SOUND ON', on: !muted });
+    buttons.push({ id: 'newpark2', x: hx + 82, y: hy + hh - 24, w: 74, h: 18, label: 'NEW PARK' });
+  } else {
+    ui.helpWin = null;
+  }
+
+  // build / ride / help toggles, on the row above
+  var ry = cy - H - 8;
+  buttons.push({ id: 'bld',  x: right - B * 3 - 7, y: ry, w: B, h: H, label: 'BLD', on: ui.build.open });
+  buttons.push({ id: 'rid',  x: right - B * 2 - 5, y: ry, w: B, h: H, label: 'RID', on: ui.rideOpen });
+  buttons.push({ id: 'help', x: right - B - 3,     y: ry, w: B, h: H, label: '?',   on: ui.showHelp });
+
+  // bottom left: the test window while a train is out, the construction
+  // window otherwise
+  ui.buildWin = ui.testWin = ui.rateWin = ui.rideWin = null;
+  if (sim.active && sim.mode === 'test' && sim.state === 'done') {
+    // a completed lap earns the proper ratings window, centred
+    var rw = Math.min(uiW - 12, 200), rh = 143;
+    var rx = (uiW - rw) >> 1, ry = Math.max(18, (uiH - rh) >> 1);
+    ui.rateWin = { x: rx, y: ry, w: rw, h: rh };
+    buttons.push({ id: 'sim_stop',  x: rx + 6,  y: ry + rh - 24, w: 52, h: 18, label: 'CLOSE' });
+    buttons.push({ id: 'sim_again', x: rx + 62, y: ry + rh - 24, w: 52, h: 18, label: 'AGAIN' });
+  } else if (sim.active && sim.mode === 'test') {
+    var tw = 128, th = 73, tx = 4, ty = uiH - th - 4;
+    ui.testWin = { x: tx, y: ty, w: tw, h: th };
+    if (sim.state === 'running') {
+      buttons.push({ id: 'sim_stop', x: tx + 5,  y: ty + th - 23, w: 42, h: 18, label: 'STOP' });
+      buttons.push({ id: 'sim_cam',  x: tx + 51, y: ty + th - 23, w: 38, h: 18, label: 'CAM', on: sim.follow });
+    } else {
+      buttons.push({ id: 'sim_stop',  x: tx + 5,  y: ty + th - 23, w: 44, h: 18, label: 'CLOSE' });
+      buttons.push({ id: 'sim_again', x: tx + 53, y: ty + th - 23, w: 44, h: 18, label: 'AGAIN' });
+    }
+  } else if (ui.rideOpen) {
+    var vw = 142, vh = 96, vx = 4, vy = uiH - vh - 4;
+    ui.rideWin = { x: vx, y: vy, w: vw, h: vh };
+    buttons.push({ id: 'price_dn', x: vx + 84,  y: vy + 44, w: 18, h: 16, label: '-' });
+    buttons.push({ id: 'price_up', x: vx + 106, y: vy + 44, w: 18, h: 16, label: '+' });
+    buttons.push({ id: 'ride_open', x: vx + 5, y: vy + vh - 23, w: 60, h: 18,
+                   label: ride.open ? 'CLOSE' : 'OPEN', on: ride.open });
+  } else if (ui.build.open) {
+    var PB = 22, PH = 18, w = PB * 5 + gap * 4 + 10, h = 140;
+    var x = 4, y = uiH - h - 4;
+    ui.buildWin = { x: x, y: y, w: w, h: h };
+    for (var i = 0; i < PALETTE.length; i++) {
+      buttons.push({
+        id: 'p_' + PALETTE[i], piece: PALETTE[i],
+        x: x + 5 + (i % 5) * (PB + gap),
+        y: y + 17 + ((i / 5) | 0) * (PH + gap),
+        w: PB, h: PH
+      });
+    }
+    for (i = 0; i < SCENERY_LIST.length; i++) {
+      buttons.push({
+        id: 'sc_' + SCENERY_LIST[i], scenery: SCENERY_LIST[i],
+        x: x + 5 + i * (28 + gap), y: y + 59, w: 28, h: 16,
+        label: SCENERY[SCENERY_LIST[i]].name.slice(0, 3),
+        on: ui.mode === 'scenery' && ui.scenery === SCENERY_LIST[i]
+      });
+    }
+    if (track.complete) {
+      buttons.push({ id: 'do_test', x: x + 5, y: y + 97, w: 52, h: 18, label: 'TEST' });
+    } else {
+      buttons.push({ id: 'do_build', x: x + 5, y: y + 97, w: 52, h: 18, label: 'BUILD' });
+    }
+    buttons.push({ id: 'do_undo', x: x + 61, y: y + 97, w: 40, h: 18, label: 'UNDO' });
+  }
+}
+
+function placeScenery(x, y) {
+  var t = tileAt(x, y);
+  if (!t) return;
+  if (ui.scenery === 'clear') {
+    if (!t.obj || t.obj.type === 'entrance') { toast('NOTHING TO CLEAR'); sfxDeny(); return; }
+    t.obj = null; sfxPlace();
+    return;
+  }
+  var sc = SCENERY[ui.scenery];
+  if (t.t !== 'grass') { toast('ONLY ON THE GRASS'); sfxDeny(); return; }
+  if (t.obj) { toast('SOMETHING IS THERE ALREADY'); sfxDeny(); return; }
+  if (park.cash < sc.cost) { toast('NOT ENOUGH MONEY'); sfxDeny(); return; }
+  park.cash -= sc.cost;
+  t.obj = { type: ui.scenery, v: (Math.random() * SPR.tree.length) | 0 };
+  sfxPlace();
+}
+
+function pressButton(b) {
+  sfxClick();
+  if (b.scenery) {
+    ui.mode = 'scenery';
+    ui.scenery = b.scenery;
+    layoutUI();
+    return;
+  }
+  if (b.piece) ui.mode = 'track';
+  if (b.piece) {
+    // tapping the piece you already have selected builds it, so a run of
+    // straights is one tap each
+    if (ui.build.sel === b.piece) placePiece(b.piece);
+    else ui.build.sel = b.piece;
+    return;
+  }
+  switch (b.id) {
+    case 'zoomin':  setZoom(zoomIdx + 1); break;      // ZOOMS ascends: bigger scale = closer
+    case 'zoomout': setZoom(zoomIdx - 1); break;
+    case 'rotate':  rotate(1); break;
+    case 'help':    ui.showHelp = !ui.showHelp; layoutUI(); break;
+    case 'bld':     ui.build.open = !ui.build.open; ui.rideOpen = false; ui.selected = null; layoutUI(); break;
+    case 'rid':     ui.rideOpen = !ui.rideOpen; ui.build.open = false; layoutUI(); break;
+    case 'price_up': ride.price = Math.min(20, ride.price + 0.2); break;
+    case 'price_dn': ride.price = Math.max(0, ride.price - 0.2); break;
+    case 'ride_open':
+      if (!ride.open && !ride.tested) { toast('TEST IT FIRST'); break; }
+      if (ride.open) closeRide('RIDE CLOSED');
+      else { ride.open = true; toast(ride.name + ' IS OPEN'); }
+      layoutUI();
+      break;
+    case 'do_build': placePiece(ui.build.sel); break;
+    case 'do_undo':  undoPiece(); layoutUI(); break;
+    case 'do_test':  startTest(); break;
+    case 'sim_stop': stopTest(); break;
+    case 'sim_again': startTest(); break;
+    case 'sim_cam':  sim.follow = !sim.follow; layoutUI(); break;
+    case 'play':     ui.title = false; layoutUI(); break;
+    case 'newpark':
+    case 'newpark2':
+      ui.confirm = { msg: 'WIPE THE PARK AND START AGAIN?', act: function () {
+        newPark(); ui.title = false; ui.showHelp = false;
+      } };
+      layoutUI();
+      break;
+    case 'yes':
+      var act = ui.confirm && ui.confirm.act;
+      ui.confirm = null;
+      if (act) act();
+      layoutUI();
+      break;
+    case 'no':  ui.confirm = null; layoutUI(); break;
+    case 'sound': muted = !muted; if (!muted) initAudio(); layoutUI(); break;
+  }
+}
+
+/* ─────────────────────────── rendering ─────────────────────────── */
+
+/* Which tile each piece gets painted on: the one nearest the camera, so the
+   terrain behind it is already down and the terrain in front still covers it. */
+var drawMap = {};
+function buildDrawMap() {
+  drawMap = {};
+  for (var i = 0; i < track.pieces.length; i++) {
+    var p = track.pieces[i], best = null, bestD = -1e9;
+    for (var c = 0; c < p.cells.length; c++) {
+      var cell = p.cells[c], dd = rotX(cell.x, cell.y) + rotY(cell.x, cell.y);
+      if (dd > bestD) { bestD = dd; best = cell; }
+    }
+    var key = best.x + ',' + best.y;
+    (drawMap[key] || (drawMap[key] = [])).push(p);
+  }
+  for (var k in drawMap) drawMap[k].sort(function (a, b) { return a.z - b.z; });
+}
+
+function drawPiece(g, p, tint, alpha) {
+  var sdir = (p.d - cam.rot + 4) % 4;
+  var spr = trackSprite(p.type, sdir, tint);
+  var rx = rotX(p.x, p.y), ry = rotY(p.x, p.y);
+  var sx = (rx - ry) * HW + cam.x + HW;
+  var sy = (rx + ry) * HH - p.z * ZH + cam.y + HH;
+  if (alpha !== undefined) g.globalAlpha = alpha;
+  drawSupports(g, p, tint);
+  g.drawImage(spr.c, Math.round(sx + spr.ox), Math.round(sy + spr.oy));
+  if (alpha !== undefined) g.globalAlpha = 1;
+}
+
+/* Posts from the track down to whatever ground is underneath it. */
+function drawSupports(g, p, tint) {
+  var def = PIECES[p.type], f = pathFn(p.type);
+  var right = (p.d + 1) % 4;
+  var n = def.tiles;                          // roughly one post per tile
+  for (var i = 0; i < n; i++) {
+    var t = (i + 0.5) / n, q = f(t);
+    var wx = p.x + q.u * DX[p.d] + q.v * DX[right];
+    var wy = p.y + q.u * DY[p.d] + q.v * DY[right];
+    var cx = clamp(Math.round(wx), 0, N - 1), cy = clamp(Math.round(wy), 0, N - 1);
+    var gh = grid[cx][cy].h;
+    var zz = p.z + q.w;
+    if (zz - gh < 0.4) continue;
+    var rx = rotX(wx, wy), ry = rotY(wx, wy);
+    var sx = Math.round((rx - ry) * HW + cam.x + HW);
+    var top = Math.round((rx + ry) * HH - zz * ZH + cam.y + HH);
+    var foot = Math.round((rx + ry) * HH - gh * ZH + cam.y + HH + 4);
+    if (foot <= top) continue;
+    g.fillStyle = tint || PAL.postD;
+    g.fillRect(sx - 1, top, 3, foot - top);
+    g.fillStyle = tint || PAL.post;
+    g.fillRect(sx - 1, top, 1, foot - top);
+  }
+}
+
+function drawTerrain(g) {
+  var maxD = 2 * N - 2;
+  for (var d = 0; d <= maxD; d++) {
+    var rxStart = Math.max(0, d - N + 1), rxEnd = Math.min(N - 1, d);
+    for (var rx = rxStart; rx <= rxEnd; rx++) {
+      var ry = d - rx;
+      var w = unrot(rx, ry), t = grid[w.x][w.y];
+      var sx = (rx - ry) * HW + cam.x;
+      var sy = (rx + ry) * HH - t.h * ZH + cam.y;
+
+      if (sx > bufW || sx + 32 < 0 || sy - 40 > bufH || sy + 100 < 0) continue;
+
+      // --- cliff faces toward the two viewer-facing neighbours ---
+      var nr = unrot(rx + 1, ry), nl = unrot(rx, ry + 1);
+      var hr = (rx + 1 < N) ? grid[nr.x][nr.y].h : null;
+      var hl = (ry + 1 < N) ? grid[nl.x][nl.y].h : null;
+      var kind = t.h >= 2 ? 'rock' : 'dirt';
+      var lip = t.t === 'grass';
+
+      var dR = (hr === null) ? t.h * ZH + 10 : (t.h - hr) * ZH;
+      if (dR > 0) g.drawImage(faceSprite('r', dR, kind, lip), sx + 16, sy + 8);
+      var dL = (hl === null) ? t.h * ZH + 10 : (t.h - hl) * ZH;
+      if (dL > 0) g.drawImage(faceSprite('l', dL, kind, lip), sx, sy + 8);
+
+      // --- tile top ---
+      if (t.t === 'water') {
+        g.drawImage(SPR.water[ui.waterFrame], sx, sy);
+      } else if (t.t === 'path') {
+        var mask = 0;
+        if (!isPathAt(rx, ry - 1)) mask |= 1;
+        if (!isPathAt(rx - 1, ry)) mask |= 2;
+        if (!isPathAt(rx, ry + 1)) mask |= 4;
+        if (!isPathAt(rx + 1, ry)) mask |= 8;
+        g.drawImage(pathSprite(mask), sx, sy);
+      } else {
+        var tone = t.h <= 1 ? 0 : t.h === 2 ? 1 : 2;
+        g.drawImage(SPR.grass[tone][(w.x * 7 + w.y * 13) & 3], sx, sy);
+      }
+
+      // --- selection highlight ---
+      if (ui.selected && ui.selected.x === w.x && ui.selected.y === w.y) {
+        drawTileOutline(g, sx, sy, '#ffffff');
+      }
+
+      // --- objects standing on the tile ---
+      if (t.obj) drawObject(g, t.obj, sx, sy);
+
+      // --- track sitting on or above this tile ---
+      var key = w.x + ',' + w.y;
+      var here = drawMap[key];
+      if (here) for (var q = 0; q < here.length; q++) drawPiece(g, here[q]);
+
+      var folk = guestMap[key];
+      if (folk) for (q = 0; q < folk.length; q++) drawGuest(folk[q], g);
+
+      var cars = carMap[key];
+      if (cars) for (q = 0; q < cars.length; q++) drawCar(g, cars[q].st, cars[q].i);
+    }
+  }
+
+  // thought bubbles last, so they sit above everything and each other
+  var shown = 0;
+  for (var n = 0; n < guests.length && shown < 5; n++) {
+    var gu = guests[n];
+    if (gu.thoughtT > 0 && gu.state !== 'ride' && gu.sx !== undefined) {
+      drawThought(gu, g); shown++;
+    }
+  }
+}
+
+/* ─────────────────────────── the train ─────────────────────────── */
+
+function projectWorld(mx, my, mz) {            // metres → buffer pixels
+  var tx = mx / TILE_M, ty = my / TILE_M, lz = mz / LEV_M;
+  var rx = rotX(tx, ty), ry = rotY(tx, ty);
+  return { sx: (rx - ry) * HW + cam.x + HW, sy: (rx + ry) * HH - lz * ZH + cam.y + HH };
+}
+function projectDir(tx, ty, lz) {              // a direction, not a point
+  var drx, dry;
+  switch (cam.rot) {
+    case 1: drx = ty; dry = -tx; break;
+    case 2: drx = -tx; dry = -ty; break;
+    case 3: drx = -ty; dry = tx; break;
+    default: drx = tx; dry = ty;
+  }
+  return { x: (drx - dry) * HW, y: (drx + dry) * HH - lz * ZH };
+}
+
+var CAR_COLS = ['#e0402c', '#d03a2a', '#c03626', '#b03222'];
+
+function drawCar(g, st, idx) {
+  var pos = projectWorld(st.x, st.y, st.z);
+  var d = projectDir(st.t.x / TILE_M, st.t.y / TILE_M, st.t.z / LEV_M);
+  var m = Math.hypot(d.x, d.y) || 1;
+  var nx = d.x / m, ny = d.y / m;
+  var col = CAR_COLS[idx % CAR_COLS.length];
+  var inverted = st.u.z < -0.25;
+
+  for (var i = -5; i <= 5; i++) {
+    var x = Math.round(pos.sx + nx * i * 0.95), y = Math.round(pos.sy + ny * i * 0.95);
+    g.fillStyle = '#2a1210'; g.fillRect(x, y - 1, 1, 3);
+    g.fillStyle = col;       g.fillRect(x, y - 5, 1, 4);
+    g.fillStyle = shadeHex(col, 1.3); g.fillRect(x, y - 5, 1, 1);
+    if (!inverted && (i === -3 || i === 1)) {
+      g.fillStyle = '#e8c49a'; g.fillRect(x, y - 7, 1, 2);
+    }
+  }
+}
+
+/* Guests are 8px tall, drawn straight to the buffer: a head, a shirt and two
+   legs that swap over as they walk. */
+function drawGuest(g, gg) {
+  var rx = rotX(g.x, g.y), ry = rotY(g.x, g.y);
+  var h = grid[clamp(Math.round(g.x), 0, N - 1)][clamp(Math.round(g.y), 0, N - 1)].h;
+  var sx = Math.round((rx - ry) * HW + cam.x + HW);
+  var sy = Math.round((rx + ry) * HH - h * ZH + cam.y + HH);
+
+  gg.fillStyle = 'rgba(0,0,0,0.25)';
+  gg.fillRect(sx - 2, sy - 1, 4, 1);
+  gg.fillStyle = g.shirt;
+  gg.fillRect(sx - 1, sy - 5, 3, 3);
+  gg.fillStyle = shadeHex(g.shirt, 0.7);
+  gg.fillRect(sx - 1, sy - 5, 1, 3);
+  gg.fillStyle = '#2f3238';                       // legs
+  if (g.frame) { gg.fillRect(sx - 1, sy - 2, 1, 2); gg.fillRect(sx + 1, sy - 2, 1, 2); }
+  else { gg.fillRect(sx, sy - 2, 2, 2); }
+  gg.fillStyle = g.skin;
+  gg.fillRect(sx - 1, sy - 8, 3, 3);
+  gg.fillStyle = '#3a2a1c';
+  gg.fillRect(sx - 1, sy - 8, 3, 1);
+  g.sx = sx; g.sy = sy;
+}
+
+function drawThought(g, gg) {
+  var w = textW(g.thought) + 6, h = 12;
+  var x = Math.round(g.sx - w / 2), y = Math.round(g.sy - 22);
+  if (x < 1) x = 1;
+  if (x + w > bufW - 1) x = bufW - 1 - w;
+  gg.fillStyle = '#f4f2ea';
+  gg.fillRect(x, y, w, h);
+  gg.fillRect(g.sx - 1, y + h, 3, 3);
+  gg.fillStyle = '#2b2b2b';
+  gg.fillRect(x, y - 1, w, 1); gg.fillRect(x, y + h, w, 1);
+  gg.fillRect(x - 1, y, 1, h); gg.fillRect(x + w, y, 1, h);
+  text(gg, g.thought, x + 3, y + 3, '#2b2b2b');
+}
+
+var carMap = {}, guestMap = {};
+function buildCarMap() {
+  carMap = {};
+  if (sim.active && sim.path) {
+    for (var i = 0; i < CARS; i++) {
+      var st = sampleAt(sim.s - i * CAR_GAP);
+      var key = clamp(Math.round(st.x / TILE_M), 0, N - 1) + ',' +
+                clamp(Math.round(st.y / TILE_M), 0, N - 1);
+      (carMap[key] || (carMap[key] = [])).push({ st: st, i: i });
+    }
+  }
+  guestMap = {};
+  for (i = 0; i < guests.length; i++) {
+    var g = guests[i];
+    if (g.state === 'ride') continue;
+    var k = clamp(Math.round(g.x), 0, N - 1) + ',' + clamp(Math.round(g.y), 0, N - 1);
+    (guestMap[k] || (guestMap[k] = [])).push(g);
+  }
+}
+
+/* The ghost always goes on top — it is a preview, not part of the scene. */
+function drawGhost(g) {
+  if (!ui.build.open || track.complete) return;
+  var type = ui.build.sel, c = track.cursor;
+  var why = checkPlace(type);
+  var tint = why ? PAL.ghostNo : PAL.ghostOK;
+
+  var cells = pieceCells(type, c.x, c.y, c.z, c.d);
+  for (var i = 0; i < cells.length; i++) {
+    var cell = cells[i];
+    if (cell.x < 0 || cell.y < 0 || cell.x >= N || cell.y >= N) continue;
+    var rx = rotX(cell.x, cell.y), ry = rotY(cell.x, cell.y);
+    drawTileOutline(g, (rx - ry) * HW + cam.x,
+                       (rx + ry) * HH - grid[cell.x][cell.y].h * ZH + cam.y, tint);
+  }
+  drawPiece(g, { type: type, x: c.x, y: c.y, z: c.z, d: c.d }, tint, 0.8);
+}
+
+function isPathAt(rx, ry) {
+  if (rx < 0 || ry < 0 || rx >= N || ry >= N) return false;
+  var w = unrot(rx, ry);
+  return grid[w.x][w.y].t === 'path';
+}
+
+function drawTileOutline(g, sx, sy, colour) {
+  g.fillStyle = colour;
+  for (var y = 0; y < 16; y++) {
+    var sp = diamondSpan(y);
+    g.fillRect(sx + sp[0], sy + y, 1, 1);
+    g.fillRect(sx + sp[0] + sp[1] - 1, sy + y, 1, 1);
+  }
+}
+
+function drawObject(g, obj, sx, sy) {
+  var img, ax = sx + 16, ay = sy + 8;
+  switch (obj.type) {
+    case 'tree':     img = SPR.tree[obj.v % SPR.tree.length]; break;
+    case 'bench':    img = SPR.deco.bench; break;
+    case 'bin':      img = SPR.deco.bin; break;
+    case 'litter':   img = SPR.deco.litter; break;
+    case 'entrance': img = SPR.deco.entrance; break;
+    default: return;
+  }
+  g.drawImage(img, Math.round(ax - img.width / 2), Math.round(ay - img.height + 3));
+}
+
+function drawTopBar(g) {
+  panel(g, 0, 0, uiW, 15);
+
+  var items = [money(park.cash), 'GUESTS ' + guests.length,
+               'HAPPY ' + Math.round(park.happy) + '%',
+               MONTHS[park.month] + ' YEAR ' + park.year];
+  var nameW = textW(park.name);
+  function itemsW() {
+    var w = 0;
+    for (var i = 0; i < items.length; i++) w += textW(items[i]) + 10;
+    return w;
+  }
+  while (items.length > 1 && nameW + 15 + itemsW() > uiW) items.pop();
+  if (nameW + 15 + itemsW() <= uiW) text(g, park.name, 5, 4, PAL.uiText);
+
+  var rx = uiW - 5;
+  for (var i = items.length - 1; i >= 0; i--) {
+    rx -= textW(items[i]);
+    text(g, items[i], rx, 4, i === 0 ? '#12401c' : PAL.uiText);
+    rx -= 10;
+  }
+}
+var MONTHS = ['MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER'];
+
+/* Piece icons: schematic side views, drawn as pixel lines. They only have to
+   be told apart at a glance — the window spells out the selected piece. */
+function iconLine(g, x0, y0, x1, y1) {
+  var dx = x1 - x0, dy = y1 - y0, n = Math.max(Math.abs(dx), Math.abs(dy));
+  for (var i = 0; i <= n; i++) {
+    g.fillRect(Math.round(x0 + dx * i / n), Math.round(y0 + dy * i / n), 1, 1);
+  }
+}
+function drawPieceIcon(g, type, bx, by, col) {
+  var x = bx + 3, y = by + 4;                 // 16×10 drawing box
+  g.fillStyle = col;
+  switch (type) {
+    case 'straight': iconLine(g, x + 1, y + 6, x + 14, y + 6); break;
+    case 'gentleUp': iconLine(g, x + 1, y + 8, x + 14, y + 3); break;
+    case 'gentleDn': iconLine(g, x + 1, y + 3, x + 14, y + 8); break;
+    case 'steepUp':  iconLine(g, x + 2, y + 9, x + 13, y + 0); break;
+    case 'steepDn':  iconLine(g, x + 2, y + 0, x + 13, y + 9); break;
+    case 'lift':
+      iconLine(g, x + 1, y + 8, x + 14, y + 3);
+      for (var i = 3; i < 14; i += 4) g.fillRect(x + i, y + 6 - ((i - 1) >> 1), 1, 1);
+      break;
+    case 'brake':
+      iconLine(g, x + 1, y + 6, x + 14, y + 6);
+      for (i = 4; i <= 12; i += 4) g.fillRect(x + i, y + 3, 1, 3);
+      break;
+    case 'curveR':
+      iconLine(g, x + 1, y + 2, x + 8, y + 2);
+      iconLine(g, x + 8, y + 2, x + 13, y + 8);
+      g.fillRect(x + 11, y + 8, 4, 2);
+      break;
+    case 'curveL':
+      iconLine(g, x + 1, y + 8, x + 8, y + 8);
+      iconLine(g, x + 8, y + 8, x + 13, y + 2);
+      g.fillRect(x + 11, y + 1, 4, 2);
+      break;
+    case 'loop':
+      for (var a = 0; a < 24; a++) {
+        var th = a / 24 * Math.PI * 2;
+        g.fillRect(Math.round(x + 8 + Math.sin(th) * 4), Math.round(y + 5 - Math.cos(th) * 4.5), 1, 1);
+      }
+      iconLine(g, x + 1, y + 9, x + 5, y + 9);
+      iconLine(g, x + 11, y + 9, x + 15, y + 9);
+      break;
+  }
+}
+
+function drawBuildWindow(g) {
+  var win = ui.buildWin;
+  if (!win) return;
+  windowFrame(g, win.x, win.y, win.w, win.h, 'BUILD TRACK');
+
+  var def = PIECES[ui.build.sel];
+  var why = track.complete ? null : checkPlace(ui.build.sel);
+
+  if (ui.mode === 'scenery') {
+    var sc = SCENERY[ui.scenery];
+    text(g, sc.name === 'CLEAR' ? 'CLEAR A TILE' : 'PLACE A ' + sc.name, win.x + 5, win.y + 81, PAL.uiText);
+    textRight(g, money(sc.cost), win.x + win.w - 5, win.y + 81, PAL.uiText);
+  } else {
+    text(g, def.name, win.x + 5, win.y + 81, PAL.uiText);
+    textRight(g, money(def.cost), win.x + win.w - 5, win.y + 81, PAL.uiText);
+  }
+
+  var status, col = PAL.uiDim;
+  if (track.complete && ride.tested) {
+    status = 'EXCITEMENT ' + ride.excitement.toFixed(2) + ' - INTENSITY ' + ride.intensity.toFixed(2);
+    col = '#12401c';
+  }
+  else if (track.complete) { status = 'CIRCUIT COMPLETE - ' + (track.pieces.length - 1) + ' PIECES'; col = '#12401c'; }
+  else if (why) { status = why; col = '#7a1f18'; }
+  else { status = (track.pieces.length - 1) + ' PIECES - NOT CLOSED YET'; }
+
+  if (ui.mode === 'scenery') { status = 'TAP A TILE TO PLACE IT'; col = PAL.uiDim; }
+  var lines = wrapText(status, Math.floor((win.w - 10) / ADV));
+  for (var i = 0; i < Math.min(2, lines.length); i++) {
+    text(g, lines[i], win.x + 5, win.y + 119 + i * 9, col);
+  }
+}
+
+function drawTestWindow(g) {
+  var win = ui.testWin;
+  if (!win) return;
+  windowFrame(g, win.x, win.y, win.w, win.h, 'TEST RUN');
+  var s = sim.stats, lines, col = PAL.uiText;
+
+  if (sim.state === 'running') {
+    var st = sampleAt(sim.s), f = forcesAt(st, sim.v);
+    lines = [
+      'SPEED ' + Math.round(sim.v * MPH) + ' MPH',
+      'G ' + f.vert.toFixed(1) + '  LAT ' + Math.abs(f.lat).toFixed(1),
+      'AIRTIME ' + s.air.toFixed(1) + ' S'
+    ];
+  } else {
+    col = sim.state === 'stalled' ? '#7a1f18' : '#12401c';
+    lines = [
+      sim.why,
+      'TOP ' + Math.round(s.top * MPH) + ' MPH  ' + s.time.toFixed(0) + ' S',
+      'MAX G ' + s.maxG.toFixed(1) + ' AIR ' + s.air.toFixed(1) + 'S'
+    ];
+  }
+  for (var i = 0; i < lines.length; i++) {
+    text(g, lines[i], win.x + 5, win.y + 17 + i * 10, i === 0 ? col : PAL.uiText);
+  }
+}
+
+function drawRideWindow(g) {
+  var win = ui.rideWin;
+  if (!win) return;
+  windowFrame(g, win.x, win.y, win.w, win.h, 'THE RIDE');
+  var x = win.x + 5, y = win.y + 17;
+
+  if (!ride.tested) {
+    text(g, 'NOT TESTED YET', x, y, '#7a1f18'); y += 10;
+    text(g, 'CLOSE THE CIRCUIT', x, y, PAL.uiText); y += 9;
+    text(g, 'AND RUN A TEST', x, y, PAL.uiText);
+  } else {
+    text(g, 'EXC ' + ride.excitement.toFixed(2) + '  INT ' + ride.intensity.toFixed(2), x, y, PAL.uiText);
+    y += 9;
+    text(g, 'NAUSEA ' + ride.nausea.toFixed(2), x, y, PAL.uiText);
+    y += 10;
+    text(g, 'QUEUE ' + queue.length + '   RIDERS ' + ride.riders, x, y, PAL.uiText);
+  }
+  text(g, 'TICKET ' + price(ride.price), win.x + 5, win.y + 48, PAL.uiText);
+  text(g, 'TAKEN ' + money(ride.takings) + '   IN ' + money(park.admissions * park.entryFee), win.x + 5, win.y + 64, PAL.uiDim);
+}
+
+function drawRatingsWindow(g) {
+  var win = ui.rateWin;
+  if (!win) return;
+  windowFrame(g, win.x, win.y, win.w, win.h, 'RIDE RATINGS');
+
+  var x = win.x + 6, y = win.y + 17;
+  var s = ride.stats, geo = ride.geom;
+
+  text(g, ride.name, x, y, PAL.uiBar); y += 11;
+
+  var rows = [
+    ['EXCITEMENT', ride.excitement, '#12401c'],
+    ['INTENSITY',  ride.intensity,  ride.intensity >= 8 ? '#7a1f18' : PAL.uiText],
+    ['NAUSEA',     ride.nausea,     ride.nausea >= 6 ? '#7a1f18' : PAL.uiText]
+  ];
+  for (var i = 0; i < rows.length; i++) {
+    text(g, rows[i][0], x, y, PAL.uiText);
+    text(g, rateText(rows[i][1]), x + 66, y, rows[i][2]);
+    y += 10;
+  }
+
+  g.fillStyle = PAL.uiLo; g.fillRect(x, y + 2, win.w - 12, 1);
+  g.fillStyle = PAL.uiHi; g.fillRect(x, y + 3, win.w - 12, 1);
+  y += 8;
+
+  var facts = [
+    'TOP SPEED ' + Math.round(s.top * MPH) + ' MPH',
+    'TIME ' + s.time.toFixed(0) + ' S    LENGTH ' + Math.round(geo.length) + ' M',
+    'DROPS ' + geo.drops.length + '    BIGGEST ' + geo.biggest.toFixed(1) + ' M',
+    'MAX G ' + s.maxG.toFixed(1) + '    AIRTIME ' + s.air.toFixed(1) + ' S',
+    'INVERSIONS ' + geo.inversions + '    TURNS ' + geo.turns
+  ];
+  for (i = 0; i < facts.length; i++) { text(g, facts[i], x, y, PAL.uiText); y += 9; }
+
+  if (ride.intensity >= 10) text(g, 'TOO INTENSE FOR GUESTS', x, y, '#7a1f18');
+}
+
+/* Greedy word wrap, in characters — the face is monospace so that is exact. */
+function wrapText(str, cols) {
+  var words = str.split(' '), lines = [], line = '';
+  for (var i = 0; i < words.length; i++) {
+    var next = line ? line + ' ' + words[i] : words[i];
+    if (next.length > cols && line) { lines.push(line); line = words[i]; }
+    else line = next;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawInfoWindow(g) {
+  var title = 'PARK', body1, body2;
+  if (ui.selected) {
+    var t = grid[ui.selected.x][ui.selected.y];
+    title = 'TILE ' + ui.selected.x + ',' + ui.selected.y;
+    body1 = (t.t === 'water' ? 'WATER' : t.t === 'path' ? 'FOOTPATH' : 'GRASS') + ' - LEVEL ' + t.h;
+    body2 = t.obj ? t.obj.type.toUpperCase() : 'NOTHING ON IT';
+  } else {
+    body1 = 'TAP A TILE TO INSPECT';
+    body2 = 'DRAG PAN - PINCH ZOOM';
+  }
+  var w = Math.min(uiW - 8, Math.max(textW(body1), textW(body2), textW(title) + 20) + 10);
+  var h = 13 + 22;
+  var x = 4, y = uiH - h - 4;
+  windowFrame(g, x, y, w, h, title);
+  text(g, body1, x + 5, y + 16, PAL.uiText);
+  text(g, body2, x + 5, y + 26, PAL.uiDim);
+}
+
+function drawHelpWindow(g) {
+  var win = ui.helpWin;
+  if (!win) return;
+  var lines = [
+    'BLD  BUILD THE TRACK',
+    'RID  OPEN IT AND SET THE PRICE',
+    'RO   TURN THE VIEW',
+    '',
+    'TRACK GROWS FROM THE STATION.',
+    'TAP A PIECE TWICE TO LAY IT.',
+    'GREEN GHOST FITS, RED DOES NOT.',
+    'GET BACK TO THE STATION TO',
+    'CLOSE THE CIRCUIT, THEN TEST IT.'
+  ];
+  windowFrame(g, win.x, win.y, win.w, win.h, 'HOW TO PLAY');
+  for (var i = 0; i < lines.length; i++) {
+    text(g, lines[i], win.x + 6, win.y + 17 + i * 10, PAL.uiText);
+  }
+}
+
+function drawTitleWindow(g) {
+  var win = ui.titleWin;
+  if (!win) return;
+  windowFrame(g, win.x, win.y, win.w, win.h, 'THRILLSBURY PARK');
+  var cx = win.x + (win.w >> 1);
+  var t1 = 'THRILLSBURY';
+  text(g, t1, cx - (textW(t1, 2) >> 1), win.y + 20, PAL.uiText, 2);
+  var t2 = 'A COASTER TYCOON';
+  text(g, t2, cx - (textW(t2) >> 1), win.y + 40, PAL.uiBar);
+  var t3 = best > 0 ? 'BEST EXCITEMENT ' + best.toFixed(2) : 'NO RIDE HAS BEEN RATED YET';
+  text(g, t3, cx - (textW(t3) >> 1), win.y + 54, best > 0 ? '#12401c' : PAL.uiDim);
+}
+
+function drawConfirmWindow(g) {
+  var win = ui.confirmWin;
+  if (!win || !ui.confirm) return;
+  windowFrame(g, win.x, win.y, win.w, win.h, 'ARE YOU SURE?');
+  var lines = wrapText(ui.confirm.msg, Math.floor((win.w - 12) / ADV));
+  for (var i = 0; i < Math.min(2, lines.length); i++) {
+    text(g, lines[i], win.x + 6, win.y + 18 + i * 10, PAL.uiText);
+  }
+}
+
+function drawToast(g) {
+  if (ui.toastT <= 0) return;
+  var w = textW(ui.toast) + 12, h = 15;
+  var x = (uiW - w) >> 1, y = 22;
+  panel(g, x, y, w, h);
+  text(g, ui.toast, x + 6, y + 4, PAL.uiText);
+}
+
+function drawUI(g) {
+  if (ui.title) {
+    drawTitleWindow(g);
+    for (var t = 0; t < buttons.length; t++) drawButton(g, buttons[t]);
+    return;
+  }
+  if (ui.confirm) {
+    drawConfirmWindow(g);
+    for (t = 0; t < buttons.length; t++) drawButton(g, buttons[t]);
+    return;
+  }
+  drawTopBar(g);
+  if (ui.rateWin) drawRatingsWindow(g);
+  else if (sim.active && sim.mode === 'test') drawTestWindow(g);
+  else if (ui.rideOpen) drawRideWindow(g);
+  else if (ui.build.open) drawBuildWindow(g);
+  else drawInfoWindow(g);
+
+  if (ui.showHelp) drawHelpWindow(g);
+
+  var p = ui.camPanel;
+  if (p) panel(g, p.x, p.y, p.w, p.h);
+  for (var i = 0; i < buttons.length; i++) {
+    var b = buttons[i];
+    if (b.piece) {
+      b.on = ui.build.sel === b.piece;
+      b.disabled = !!checkPlace(b.piece);
+    } else if (b.id === 'do_build') {
+      b.disabled = !!checkPlace(ui.build.sel);
+    } else if (b.id === 'do_undo') {
+      b.disabled = track.pieces.length <= 1;
+    }
+    drawButton(g, b);
+  }
+
+  drawToast(g);
+}
+
+function render() {
+  bctx.fillStyle = PAL.vd;
+  bctx.fillRect(0, 0, bufW, bufH);
+  buildDrawMap();
+  buildCarMap();
+  drawTerrain(bctx);
+  drawGhost(bctx);
+
+  uctx.clearRect(0, 0, uiW, uiH);
+  drawUI(uctx);
+
+  dctx.imageSmoothingEnabled = false;
+  dctx.drawImage(buf.c, 0, 0, bufW, bufH, 0, 0, bufW * scale, bufH * scale);
+  dctx.drawImage(uibuf.c, 0, 0, uiW, uiH, 0, 0, uiW * uiScale, uiH * uiScale);
+}
+
+/* ─────────────────────────── input ───────────────────────────
+   Pointer Events only. One finger drags the map, two pinch to zoom, a short
+   still press is a tap. Nothing depends on hover. */
+
+var pointers = new Map();
+var pinch = null;
+var TAP_MOVE = 8, TAP_MS = 500;
+
+function toBuf(e) {           // world-buffer pixels (terrain, picking)
+  var r = disp.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (disp.width / r.width) / scale,
+    y: (e.clientY - r.top) * (disp.height / r.height) / scale
+  };
+}
+function toUI(e) {            // UI-layer pixels (windows, buttons)
+  var r = disp.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (disp.width / r.width) / uiScale,
+    y: (e.clientY - r.top) * (disp.height / r.height) / uiScale
+  };
+}
+
+function onDown(e) {
+  initAudio();
+  try { disp.setPointerCapture(e.pointerId); } catch (err) { /* not a live pointer */ }
+  var b = toBuf(e);
+  pointers.set(e.pointerId, {
+    id: e.pointerId, cx: e.clientX, cy: e.clientY,
+    startX: e.clientX, startY: e.clientY,
+    bx: b.x, by: b.y, t: performance.now(), moved: false, btn: null
+  });
+
+  if (pointers.size === 1) {
+    var u = toUI(e);
+    var hit = hitButton(u.x, u.y);
+    if (hit) { hit.pressed = true; pointers.get(e.pointerId).btn = hit; }
+  } else if (pointers.size === 2) {
+    var ps = Array.from(pointers.values());
+    ps.forEach(function (p) { p.moved = true; if (p.btn) { p.btn.pressed = false; p.btn = null; } });
+    pinch = {
+      dist: dist(ps[0], ps[1]),
+      zoom: zoomIdx,
+      mid: midBuf(ps[0], ps[1])
+    };
+  }
+  e.preventDefault();
+}
+
+function dist(a, b) {
+  var dx = a.cx - b.cx, dy = a.cy - b.cy;
+  return Math.max(1, Math.hypot(dx, dy));
+}
+function midBuf(a, b) {
+  var r = disp.getBoundingClientRect();
+  return {
+    x: ((a.cx + b.cx) / 2 - r.left) * (disp.width / r.width) / scale,
+    y: ((a.cy + b.cy) / 2 - r.top) * (disp.height / r.height) / scale
+  };
+}
+
+function onMove(e) {
+  var p = pointers.get(e.pointerId);
+  if (!p) return;
+  var prevX = p.cx, prevY = p.cy;
+  p.cx = e.clientX; p.cy = e.clientY;
+  if (Math.abs(p.cx - p.startX) > TAP_MOVE || Math.abs(p.cy - p.startY) > TAP_MOVE) {
+    if (!p.moved && p.btn) { p.btn.pressed = false; p.btn = null; }
+    p.moved = true;
+  }
+
+  if (pointers.size >= 2 && pinch) {
+    var ps = Array.from(pointers.values());
+    var d = dist(ps[0], ps[1]);
+    var ratio = d / pinch.dist;
+    // ZOOMS is ordered coarse→fine in *device px per world px*, so a bigger
+    // scale means zoomed in. Spread fingers → bigger scale → higher index.
+    var target = ZOOMS[pinch.zoom] * ratio;
+    var best = pinch.zoom, bestErr = Infinity;
+    for (var i = 0; i < ZOOMS.length; i++) {
+      var err = Math.abs(Math.log(ZOOMS[i] / target));
+      if (err < bestErr) { bestErr = err; best = i; }
+    }
+    var mid = midBuf(ps[0], ps[1]);
+    if (best !== zoomIdx) setZoom(best, mid.x, mid.y);
+    else {
+      cam.x += mid.x - pinch.mid.x;
+      cam.y += mid.y - pinch.mid.y;
+      clampCam();
+    }
+    pinch.mid = midBuf(ps[0], ps[1]);
+    e.preventDefault();
+    return;
+  }
+
+  if (pointers.size === 1 && p.moved) {
+    var r = disp.getBoundingClientRect();
+    var k = (disp.width / r.width) / scale;
+    cam.x += (p.cx - prevX) * k;
+    cam.y += (p.cy - prevY) * k;
+    clampCam();
+    if (sim.follow) { sim.follow = false; layoutUI(); }   // dragging takes over
+  }
+  e.preventDefault();
+}
+
+function onUp(e) {
+  var p = pointers.get(e.pointerId);
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+  if (!p) return;
+
+  if (p.btn) {
+    p.btn.pressed = false;
+    var still = !p.moved && performance.now() - p.t < TAP_MS * 3;
+    if (still) pressButton(p.btn);
+    e.preventDefault();
+    return;
+  }
+  if (!p.moved && performance.now() - p.t < TAP_MS) tap(toBuf(e));
+  e.preventDefault();
+}
+
+function onCancel(e) {
+  var p = pointers.get(e.pointerId);
+  if (p && p.btn) p.btn.pressed = false;
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+}
+
+function tap(b) {
+  var t = pickTile(b.x, b.y);
+  if (t && ui.build.open && ui.mode === 'scenery') { placeScenery(t.x, t.y); return; }
+  ui.selected = t;
+  if (!t) toast('THAT IS THE VOID');
+}
+
+disp.addEventListener('pointerdown', onDown, { passive: false });
+disp.addEventListener('pointermove', onMove, { passive: false });
+disp.addEventListener('pointerup', onUp, { passive: false });
+disp.addEventListener('pointercancel', onCancel);
+disp.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+disp.addEventListener('wheel', function (e) {
+  var b = toBuf(e);
+  setZoom(zoomIdx + (e.deltaY > 0 ? -1 : 1), b.x, b.y);
+  e.preventDefault();
+}, { passive: false });
+
+var keys = {};
+window.addEventListener('keydown', function (e) {
+  keys[e.key] = true;
+  if (e.key === 'r' || e.key === 'R') rotate(1);
+  if (e.key === '?' || e.key === '/') { ui.showHelp = !ui.showHelp; layoutUI(); }
+  if (e.key === '+' || e.key === '=') setZoom(zoomIdx + 1);
+  if (e.key === '-' || e.key === '_') setZoom(zoomIdx - 1);
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].indexOf(e.key) >= 0) e.preventDefault();
+});
+window.addEventListener('keyup', function (e) { keys[e.key] = false; });
+window.addEventListener('blur', function () { keys = {}; });
+
+/* ─────────────────────────── main loop ─────────────────────────── */
+
+function update(dt) {
+  if (ui.title || ui.confirm) return;     // the park waits while a dialog is up
+
+  saveT += dt;
+  if (saveT > 5) { saveT = 0; saveGame(); }
+
+  var pan = 160 * dt;
+  if (keys.ArrowLeft || keys.a) cam.x += pan;
+  if (keys.ArrowRight || keys.d) cam.x -= pan;
+  if (keys.ArrowUp || keys.w) cam.y += pan;
+  if (keys.ArrowDown || keys.s) cam.y -= pan;
+  if (keys.ArrowLeft || keys.ArrowRight || keys.ArrowUp || keys.ArrowDown) clampCam();
+
+  ui.waterT += dt;
+  if (ui.waterT > 0.35) { ui.waterT = 0; ui.waterFrame = (ui.waterFrame + 1) % SPR.water.length; }
+  if (ui.toastT > 0) ui.toastT -= dt;
+
+  // two substeps: the curvature through a loop is tight enough to want them
+  if (sim.active) { stepSim(dt / 2); stepSim(dt / 2); }
+  stepGuests(dt);
+
+  // the calendar: a month every couple of minutes
+  park.clock += dt;
+  if (park.clock > 100) {
+    park.clock = 0;
+    park.month++;
+    if (park.month >= MONTHS.length) { park.month = 0; park.year++; }
+  }
+
+  if (sim.active && sim.follow && sim.path) {
+    var st = sampleAt(sim.s), pos = projectWorld(st.x, st.y, st.z);
+    cam.x += (bufW / 2 - pos.sx) * 0.12;
+    cam.y += (bufH * 0.46 - pos.sy) * 0.12;
+    clampCam();
+  }
+
+  // Phase 5 hook: the guest sim steps here.
+}
+
+var lastT = 0, acc = 0;
+function loop(ts) {
+  requestAnimationFrame(loop);
+  if (!lastT) lastT = ts;
+  var dt = (ts - lastT) / 1000;
+  lastT = ts;
+  if (dt > MAX_DT) dt = MAX_DT;
+  acc += dt;
+  var steps = 0;
+  while (acc >= STEP && steps < 8) { update(STEP); acc -= STEP; steps++; }
+  if (steps === 8) acc = 0;
+  render();
+}
+
+/* ─────────────────────────── boot ─────────────────────────── */
+
+buildSprites();
+generatePark();
+initTrack();
+loadBest();
+if (!loadGame()) { generatePark(); initTrack(); }
+buildPathList();
+resize();
+centreOn(11, 11);
+layoutUI();
+
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', function () { setTimeout(resize, 120); });
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', resize);
+  window.visualViewport.addEventListener('scroll', resize);
+}
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) saveGame();
+  else { lastT = 0; acc = 0; }
+});
+window.addEventListener('pagehide', saveGame);
+
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
