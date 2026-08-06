@@ -1395,6 +1395,7 @@ function placeRidePiece(ride, id) {
   var c = ride.cursor, def = pieceDef(ride, id);
   addPiece(ride, id, c.x, c.y, c.z, c.d);
   park.cash -= def.cost;
+  ride.spent = (ride.spent || 0) + def.cost;
   var closed = closesCircuit(ride, id);
   ride.cursor = pieceExit(def, c.x, c.y, c.z, c.d);
   if (closed) {
@@ -1411,8 +1412,11 @@ function undoRidePiece(ride) {
   if (ride.pieces.length <= 1) { toast('THE STATION STAYS PUT'); return; }
   var piece = ride.pieces.pop();
   park.cash += pieceDef(ride, piece.type).cost;
+  ride.spent = Math.max(0, (ride.spent || 0) - pieceDef(ride, piece.type).cost);
   ride.cursor = { x: piece.x, y: piece.y, z: piece.z, d: piece.d };
   ride.complete = false;
+  ride.tested = false;
+  if (ride.status === 'open') ride.status = 'closed';
   reclaimTiles(ride);
   if (build.mode === 'entrance' || build.mode === 'exit') build.mode = 'track';
   layoutUI();
@@ -1433,6 +1437,54 @@ function reclaimTiles(ride) {
   }
   if (ride.entranceTile) { var e = tileAt(ride.entranceTile.x, ride.entranceTile.y); if (e) e.rideId = ride.id; }
   if (ride.exitTile) { var x2 = tileAt(ride.exitTile.x, ride.exitTile.y); if (x2) x2.rideId = ride.id; }
+}
+
+/* Can this ride open? Every refusal names itself, because "nothing happens"
+   is the worst answer a park game can give. The connectivity rule is the
+   whole point of the path graph. */
+function doorReachable(tile) {
+  if (!tile) return false;
+  for (var d = 0; d < 4; d++) {
+    var nx = tile.x + DX[d], ny = tile.y + DY[d];
+    var t = tileAt(nx, ny);
+    if (t && t.path && isConnected(nx, ny)) return true;
+  }
+  return false;
+}
+function canOpen(ride) {
+  if (!ride.complete) return 'THE CIRCUIT IS NOT FINISHED';
+  if (!ride.entranceTile) return 'IT NEEDS A WAY IN';
+  if (!ride.exitTile) return 'IT NEEDS A WAY OUT';
+  if (!ride.tested) return 'IT HAS NOT BEEN TESTED';
+  if (!doorReachable(ride.entranceTile)) return 'THE WAY IN IS NOT CONNECTED TO THE PARK ENTRANCE';
+  if (!doorReachable(ride.exitTile)) return 'THE WAY OUT IS NOT CONNECTED TO THE PARK ENTRANCE';
+  return null;
+}
+function rideStatusText(ride) {
+  if (sim.active && sim.ride === ride) return 'TESTING';
+  if (ride.status === 'open') return 'OPEN';
+  if (!ride.complete) return 'BUILDING';
+  if (!ride.tested) return 'UNTESTED';
+  return 'CLOSED';
+}
+
+function deleteRide(ride) {
+  var refund = Math.round((ride.spent || 0) * 0.5);
+  for (var i = 0; i < world.tiles.length; i++) {
+    var t = world.tiles[i];
+    if (t.rideId === ride.id) {
+      t.rideId = null;
+      if (t.object && (t.object.type === 'rideEntrance' || t.object.type === 'rideExit')) t.object = null;
+    }
+  }
+  rides.splice(rides.indexOf(ride), 1);
+  park.cash += refund;
+  if (build.ride === ride) { build.ride = null; build.mode = null; }
+  if (sim.ride === ride) stopRun();
+  closeWinQuiet('ride_' + ride.id);
+  toast('DEMOLISHED - ' + money(refund) + ' BACK');
+  layoutUI();
+  saveGame();
 }
 
 function rideById(id) {
@@ -1480,7 +1532,7 @@ function createRide(typeId, x, y, d) {
     status: 'building',
     ratings: { excitement: 0, intensity: 0, nausea: 0 },
     ticketPrice: 2,
-    queue: [], vehicles: [], stats: {}
+    queue: [], vehicles: [], stats: {}, spent: plan.cost, tested: false
   };
   rides.push(ride);
   for (var c = 0; c < plan.cells.length; c++) {
@@ -1694,7 +1746,7 @@ function computeRatings(ride) {
   ride.stats = s;
   ride.geom = g;
   ride.tested = true;
-  ride.status = 'closed';
+  if (ride.status !== 'open') ride.status = 'closed';
 }
 
 function sampleAt(s) {
@@ -2183,6 +2235,7 @@ function layoutUI() {
   ui.camPanel = { x: cx, y: cy, w: cw, h: ch };
 
   var ry = cy - H - 8;
+  buttons.push({ id: 'rides', x: right - B * 3 - 7, y: ry, w: B, h: H, label: 'RDS', on: !!findWin('rides') });
   buttons.push({ id: 'links', x: right - B * 2 - 5, y: ry, w: B, h: H, label: 'LNK', on: ui.showLinks });
   buttons.push({ id: 'help',  x: right - B - 3,     y: ry, w: B, h: H, label: '?',   on: !!findWin('help') });
 
@@ -2222,7 +2275,7 @@ function layoutUI() {
     var bw = findWin('build');
     if (!bw) {
       bw = openWinRaw({ id: 'build', title: 'BUILD TRACK', w: 128, h: 114,
-                        x: 8, y: 40, draw: drawBuildWinBody });
+                        x: 8, y: Math.max(20, uiH - 170), draw: drawBuildWinBody });
     }
     var pal = PIECE_PALETTES[rideType(build.ride.typeId).pieceSet];
     for (var pi = 0; pi < pal.length; pi++) {
@@ -2267,6 +2320,28 @@ function layoutUI() {
     closeWinQuiet('test');
   }
 
+  // per-ride controls hang off whichever detail windows are open
+  for (var wj = 0; wj < wins.length; wj++) {
+    var rw2 = wins[wj];
+    if (rw2.id.indexOf('ride_') !== 0) continue;
+    var r2 = rideById(rw2.ride);
+    if (!r2) continue;
+    var by = rw2.y + rw2.h - 40;
+    buttons.push({ id: 'price_dn_' + r2.id, rideAct: 'price_dn', rideRef: r2.id,
+                   x: rw2.x + 110, y: rw2.y + 61, w: 16, h: 14, label: '-' });
+    buttons.push({ id: 'price_up_' + r2.id, rideAct: 'price_up', rideRef: r2.id,
+                   x: rw2.x + 130, y: rw2.y + 61, w: 16, h: 14, label: '+' });
+    buttons.push({ id: 'open_' + r2.id, rideAct: 'toggle', rideRef: r2.id,
+                   x: rw2.x + 6, y: by, w: 52, h: 18,
+                   label: r2.status === 'open' ? 'CLOSE' : 'OPEN', on: r2.status === 'open' });
+    buttons.push({ id: 'rename_' + r2.id, rideAct: 'rename', rideRef: r2.id,
+                   x: rw2.x + 62, y: by, w: 52, h: 18, label: 'NAME' });
+    buttons.push({ id: 'build_' + r2.id, rideAct: 'build', rideRef: r2.id,
+                   x: rw2.x + 118, y: by, w: 30, h: 18, label: 'EDIT' });
+    buttons.push({ id: 'demo_' + r2.id, rideAct: 'demolish', rideRef: r2.id,
+                   x: rw2.x + 152, y: by, w: 28, h: 18, label: 'BIN' });
+  }
+
   placeWins();
   for (var wi = 0; wi < wins.length; wi++) {
     var w = wins[wi];
@@ -2276,8 +2351,45 @@ function layoutUI() {
 
 }
 
+function rideAction(act, ride) {
+  if (!ride) return;
+  switch (act) {
+    case 'price_up': ride.ticketPrice = Math.min(20, ride.ticketPrice + 0.2); break;
+    case 'price_dn': ride.ticketPrice = Math.max(0, ride.ticketPrice - 0.2); break;
+    case 'toggle':
+      if (ride.status === 'open') { ride.status = 'closed'; toast(ride.name + ' IS CLOSED'); }
+      else {
+        var why = canOpen(ride);
+        if (why) { toast(why); break; }
+        ride.status = 'open';
+        toast(ride.name + ' IS OPEN');
+      }
+      break;
+    case 'rename':
+      // the one native control in the game: a canvas keyboard is not worth it
+      var name = window.prompt('WHAT IS IT CALLED?', ride.name);
+      if (name) ride.name = name.toUpperCase().slice(0, 26);
+      closeWinQuiet('ride_' + ride.id);
+      openRideWin(ride);
+      break;
+    case 'build':
+      build.ride = ride;
+      build.mode = ride.complete ? 'track' : 'track';
+      build.piece = PIECE_PALETTES[rideType(ride.typeId).pieceSet][0];
+      build.cat = null;
+      toast('EDITING ' + ride.name);
+      break;
+    case 'demolish':
+      ui.confirm = { msg: 'DEMOLISH ' + ride.name + '?', act: function () { deleteRide(ride); } };
+      break;
+  }
+  layoutUI();
+  saveGame();
+}
+
 function pressButton(b) {
   if (b.win) { closeWin(b.win); return; }
+  if (b.rideAct) { rideAction(b.rideAct, rideById(b.rideRef)); return; }
   if (b.cat) {                              // a category opens or closes its row
     build.cat = build.cat === b.cat ? null : b.cat;
     if (!build.cat) disarm(); else layoutUI();
@@ -2310,6 +2422,7 @@ function pressButton(b) {
     case 'help':    toggleWin('help', openHelpWin); break;
     case 'park':    toggleWin('park', openParkWin); break;
     case 'links':   ui.showLinks = !ui.showLinks; layoutUI(); break;
+    case 'rides':   toggleWin('rides', openRidesWin); break;
     case 'notice_ok': dismissNotice(); break;
     case 'done':    disarm(); break;
     case 'do_build': if (build.ride) placeRidePiece(build.ride, build.piece); break;
@@ -2863,6 +2976,66 @@ function openTileWin(t) {
   });
 }
 
+function openRidesWin() {
+  openWin({
+    id: 'rides', title: 'RIDES IN THE PARK', w: 196, h: 13 + 12 + rides.length * 20 + 6,
+    x: 150, y: 22,
+    draw: function (g, win) {
+      if (!rides.length) {
+        text(g, 'NOTHING BUILT YET.', win.x + 6, win.y + 18, PAL.uiDim);
+        text(g, 'PICK RIDES BELOW TO START ONE.', win.x + 6, win.y + 28, PAL.uiDim);
+        return;
+      }
+      for (var i = 0; i < rides.length; i++) {
+        var r = rides[i], y = win.y + 18 + i * 20;
+        text(g, r.name, win.x + 6, y, PAL.uiText);
+        var st = rideStatusText(r);
+        textRight(g, st, win.x + win.w - 6, y,
+                  st === 'OPEN' ? '#12401c' : st === 'BUILDING' ? '#7a4a10' : PAL.uiDim);
+        var line = r.tested
+          ? 'E ' + r.ratings.excitement.toFixed(2) + '  I ' + r.ratings.intensity.toFixed(2) +
+            '  N ' + r.ratings.nausea.toFixed(2)
+          : 'NOT RATED';
+        text(g, line, win.x + 6, y + 9, PAL.uiDim);
+        textRight(g, 'QUEUE ' + r.queue.length, win.x + win.w - 6, y + 9, PAL.uiDim);
+      }
+    }
+  });
+}
+
+function openRideWin(ride) {
+  openWin({
+    id: 'ride_' + ride.id, title: ride.name.slice(0, 22), w: 186, h: 13 + 96,
+    x: 170, y: 120,
+    ride: ride.id,
+    draw: function (g, win) {
+      var r = rideById(win.ride);
+      if (!r) return;
+      var x = win.x + 6, y = win.y + 17;
+      text(g, 'STATUS', x, y, PAL.uiDim);
+      text(g, rideStatusText(r), x + 50, y, PAL.uiText); y += 10;
+      if (r.tested) {
+        text(g, 'EXCITE', x, y, PAL.uiDim); text(g, r.ratings.excitement.toFixed(2), x + 50, y, PAL.uiText); y += 9;
+        text(g, 'INTENSE', x, y, PAL.uiDim); text(g, r.ratings.intensity.toFixed(2), x + 50, y,
+             r.ratings.intensity >= 10 ? '#7a1f18' : PAL.uiText); y += 9;
+        text(g, 'NAUSEA', x, y, PAL.uiDim); text(g, r.ratings.nausea.toFixed(2), x + 50, y, PAL.uiText); y += 10;
+      } else {
+        text(g, 'NOT TESTED YET', x, y, '#7a4a10'); y += 19;
+      }
+      text(g, 'TICKET', x, y, PAL.uiDim);
+      text(g, '£' + r.ticketPrice.toFixed(2), x + 50, y, PAL.uiText);
+      y += 12;
+      var why = canOpen(r);
+      if (why && r.status !== 'open') {
+        var lines = wrapText(why, Math.floor((win.w - 12) / ADV));
+        for (var i = 0; i < Math.min(2, lines.length); i++) {
+          text(g, lines[i], x, y + i * 9, '#7a1f18');
+        }
+      }
+    }
+  });
+}
+
 function openParkWin() {
   openWin({
     id: 'park', title: 'THE PARK', w: 168, h: 13 + 62,
@@ -3226,7 +3399,15 @@ function onCancel(e) {
 
 function tap(b, uiPt) {
   if (ui.notice) return;
-  if (uiPt && winAt(uiPt.x, uiPt.y)) return;
+  if (uiPt) {
+    var over = winAt(uiPt.x, uiPt.y);
+    if (over && over.id === 'rides') {
+      var row = Math.floor((uiPt.y - (over.y + 16)) / 20);
+      if (row >= 0 && row < rides.length) openRideWin(rides[row]);
+      return;
+    }
+    if (over) return;
+  }
   var t = pickTile(b.x, b.y);
 
   if (build.mode === 'station') {
@@ -3325,7 +3506,8 @@ function serialiseRides() {
       id: r.id, name: r.name, typeId: r.typeId, pieces: pieces,
       station: r.station, cursor: r.cursor, complete: r.complete,
       entranceTile: r.entranceTile, exitTile: r.exitTile,
-      status: r.status, ratings: r.ratings, ticketPrice: r.ticketPrice
+      status: r.status, ratings: r.ratings, ticketPrice: r.ticketPrice,
+      tested: !!r.tested, spent: r.spent || 0
     });
   }
   return out;
@@ -3341,6 +3523,7 @@ function restoreRides(saved) {
       status: d.status || 'closed',
       ratings: d.ratings || { excitement: 0, intensity: 0, nausea: 0 },
       ticketPrice: d.ticketPrice === undefined ? 2 : d.ticketPrice,
+      tested: !!d.tested, spent: d.spent || 0,
       queue: [], vehicles: [], stats: {}
     };
     rides.push(r);
