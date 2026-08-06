@@ -679,6 +679,52 @@ function makeSign() {
   return t.c;
 }
 
+/* Shops and stalls: a hut with a pitched roof, an awning over the counter and
+   a sign board in the trade's colour. Same pixel density and outlining as the
+   rest of the world. */
+function makeHut(ft) {
+  var t = newCanvas(28, 30), g = t.g;
+  var body = ft.body, roof = ft.roof, sign = ft.sign;
+  var dark = shadeHex(body, 0.72), roofD = shadeHex(roof, 0.7);
+
+  g.fillStyle = dark;  g.fillRect(4, 12, 20, 14);          // walls
+  g.fillStyle = body;  g.fillRect(4, 12, 11, 14);
+  g.fillStyle = shadeHex(body, 0.55);
+  g.fillRect(4, 25, 20, 1);
+
+  for (var r = 0; r < 7; r++) {                            // pitched roof
+    g.fillStyle = r < 2 ? roof : (r % 2 ? roofD : roof);
+    g.fillRect(2 + r, 5 + r, 24 - r * 2, 1);
+  }
+  g.fillStyle = roofD; g.fillRect(2, 11, 24, 2);
+
+  g.fillStyle = '#3a3a3a'; g.fillRect(9, 17, 6, 9);        // door
+  g.fillStyle = '#2a2a2a'; g.fillRect(9, 17, 6, 1);
+  g.fillStyle = PAL.gold;  g.fillRect(14, 21, 1, 1);
+
+  g.fillStyle = sign;      g.fillRect(16, 15, 7, 5);       // sign board
+  g.fillStyle = shadeHex(sign, 0.6); g.fillRect(16, 19, 7, 1);
+  g.fillStyle = '#ffffff'; g.fillRect(17, 17, 5, 1);
+  return t.c;
+}
+function makeBenchSpr() {
+  var t = newCanvas(14, 11), g = t.g;
+  g.fillStyle = PAL.woodD; g.fillRect(1, 6, 2, 5); g.fillRect(11, 6, 2, 5);
+  g.fillStyle = PAL.wood;  g.fillRect(0, 4, 14, 2);
+  g.fillStyle = PAL.woodD; g.fillRect(0, 6, 14, 1);
+  g.fillStyle = PAL.wood;  g.fillRect(1, 0, 12, 1); g.fillRect(1, 2, 12, 1);
+  g.fillStyle = PAL.woodD; g.fillRect(1, 1, 12, 1); g.fillRect(1, 3, 12, 1);
+  return t.c;
+}
+function makeBinSpr() {
+  var t = newCanvas(8, 12), g = t.g;
+  g.fillStyle = '#2f4f2f'; g.fillRect(1, 3, 6, 9);
+  g.fillStyle = '#3f6b3f'; g.fillRect(1, 3, 2, 9);
+  g.fillStyle = '#1f331f'; g.fillRect(0, 1, 8, 2);
+  g.fillStyle = '#4a7a4a'; g.fillRect(2, 5, 1, 5);
+  return t.c;
+}
+
 /* A little kiosk for the way on and the way off a ride. */
 function makeDoor(colour) {
   var t = newCanvas(22, 22), g = t.g;
@@ -762,6 +808,13 @@ function buildSprites() {
   SPR.deco.sign = makeSign();
   SPR.deco.rideIn = makeDoor('#2f8f3a');
   SPR.deco.rideOut = makeDoor('#a83232');
+  SPR.deco.bench = makeBenchSpr();
+  SPR.deco.bin = makeBinSpr();
+  SPR.hut = {};
+  for (var fi = 0; fi < FACILITY_TYPES.length; fi++) {
+    var ft = FACILITY_TYPES[fi];
+    if (!ft.onPath) SPR.hut[ft.id] = makeHut(ft);
+  }
   for (var i = 0; i < 4; i++) fenceSprite(i);
 }
 
@@ -1037,6 +1090,42 @@ function doClear(x, y) {
   t.path = null;
   if (t.object && t.object.type !== 'entrance') t.object = null;
 }
+/* A shop needs a door onto a footpath. Benches and bins go on the path
+   itself. Both go through the same planner as paths and land. */
+function facilityPlan(x, y, ft) {
+  var t = tileAt(x, y);
+  if (!t) return { ok: false, why: 'OFF THE EDGE OF THE MAP' };
+  if (!t.owned) return { ok: false, why: 'YOU DO NOT OWN THAT LAND' };
+  if (t.rideId !== null) return { ok: false, why: 'A RIDE IS IN THE WAY' };
+
+  if (ft.onPath) {
+    if (!t.path) return { ok: false, why: 'THAT GOES ON A FOOTPATH' };
+    if (t.path.type !== 'foot') return { ok: false, why: 'NOT ON A QUEUE LINE' };
+    if (t.object) return { ok: false, why: 'SOMETHING IS THERE ALREADY', silent: true };
+    return { ok: true, cost: ft.cost, onPath: true };
+  }
+
+  if (isWater(t)) return { ok: false, why: 'NOT IN THE WATER' };
+  if (t.path) return { ok: false, why: 'THAT IS A FOOTPATH' };
+  if (t.object) return { ok: false, why: 'SOMETHING IS IN THE WAY', silent: true };
+
+  var door = null;
+  for (var d = 0; d < 4; d++) {
+    var nb = tileAt(x + DX[d], y + DY[d]);
+    if (nb && nb.path && nb.path.type === 'foot' && Math.abs(nb.path.level - t.h) <= 1) { door = d; break; }
+  }
+  if (door === null) return { ok: false, why: 'IT NEEDS A FOOTPATH AT THE DOOR' };
+  return { ok: true, cost: ft.cost, door: door };
+}
+
+function placeFacility(x, y, ft, plan) {
+  var t = tileAt(x, y);
+  t.object = {
+    type: 'facility', fid: ft.id, door: plan.door === undefined ? 0 : plan.door,
+    price: ft.price, queue: [], served: 0, takings: 0
+  };
+}
+
 function landPlan(x, y) {
   var t = tileAt(x, y);
   if (!t) return { ok: false, why: 'OFF THE MAP' };
@@ -1081,6 +1170,7 @@ function planStroke() {
     var tl = tiles[i], plan;
     if (build.tool.kind === 'path') plan = pathPlan(tl.x, tl.y, build.tool.pathType);
     else if (build.tool.kind === 'clear') plan = clearPlan(tl.x, tl.y);
+    else if (build.tool.kind === 'facility') plan = facilityPlan(tl.x, tl.y, build.tool.facility);
     else plan = landPlan(tl.x, tl.y);
     plan.x = tl.x; plan.y = tl.y;
     st.plans.push(plan);
@@ -1119,12 +1209,15 @@ function commitStroke() {
     if (spent + (plan.cost || 0) > park.cash) break;
     if (build.tool.kind === 'path') placePath(plan.x, plan.y, build.tool.pathType, plan);
     else if (build.tool.kind === 'clear') doClear(plan.x, plan.y);
+    else if (build.tool.kind === 'facility') placeFacility(plan.x, plan.y, build.tool.facility, plan);
     else { tileAt(plan.x, plan.y).owned = true; tileAt(plan.x, plan.y).forSale = false; }
     spent += plan.cost || 0;
     n++;
   }
   park.cash -= spent;
-  if (build.tool.kind === 'land') {
+  if (build.tool.kind === 'facility') {
+    toast(build.tool.facility.name + ' - ' + money(spent));
+  } else if (build.tool.kind === 'land') {
     park.owned = ownedCount();
     toast('BOUGHT ' + n + ' TILES FOR ' + money(spent));
   } else if (spent > 0) {
@@ -1160,6 +1253,7 @@ var TOOLS = {
 function categories() {
   var seen = {}, out = [];
   for (var k in TOOLS) if (!seen[TOOLS[k].cat]) { seen[TOOLS[k].cat] = 1; out.push(TOOLS[k].cat); }
+  if (FACILITY_TYPES.length && !seen.SHOPS) out.unshift('SHOPS');
   if (RIDE_TYPES.length && !seen.RIDES) out.unshift('RIDES');
   return out;
 }
@@ -1172,8 +1266,45 @@ function categoryOptions(cat) {
     }
     return out;
   }
+  if (cat === 'SHOPS') {
+    for (var j = 0; j < FACILITY_TYPES.length; j++) {
+      var ft = FACILITY_TYPES[j];
+      out.push({ id: 'fac_' + ft.id, label: ft.name.split(' ')[0].slice(0, 6),
+                 kind: 'facility', facility: ft, cat: 'SHOPS', drag: 'line',
+                 tint: '#f0c040', hint: ft.name + '  ' + money(ft.cost) });
+    }
+    return out;
+  }
   for (var k in TOOLS) if (TOOLS[k].cat === cat) out.push(TOOLS[k]);
   return out;
+}
+
+/* ── facilities ─────────────────────────────────────────────────────────
+   One tile each, a door that must face a footpath, a queue, a capacity and a
+   price. Placed through the same armed-tool path as everything else, which is
+   also the path a flat ride will use — footprint placement is footprint
+   placement whether the thing spins or sells chips. */
+var FACILITY_TYPES = [
+  { id: 'toilets',  name: 'TOILETS',      cost: 400, price: 0.5, capacity: 4,
+    serves: 'bladder', body: '#8fa4b8', roof: '#4a6377', sign: '#2f5fa8' },
+  { id: 'burger',   name: 'BURGER BAR',   cost: 600, price: 2.5, capacity: 3,
+    serves: 'hunger',  body: '#d8b878', roof: '#a83232', sign: '#f0c040' },
+  { id: 'chips',    name: 'CHIP SHOP',    cost: 650, price: 2.8, capacity: 3,
+    serves: 'hunger',  body: '#e0d0a0', roof: '#2f6f4f', sign: '#f0c040' },
+  { id: 'drinks',   name: 'DRINKS STALL', cost: 450, price: 1.4, capacity: 3,
+    serves: 'thirst',  raises: 'bladder', body: '#a8c8d8', roof: '#2f7f9f', sign: '#ffffff' },
+  { id: 'firstaid', name: 'FIRST AID',    cost: 700, price: 0,   capacity: 2,
+    serves: 'nausea',  body: '#e8e4dc', roof: '#c03a2b', sign: '#c03a2b' },
+  { id: 'info',     name: 'INFO KIOSK',   cost: 350, price: 1,   capacity: 2,
+    serves: 'lost',    body: '#c8b8a0', roof: '#6b5136', sign: '#2f5fa8' },
+  { id: 'bench',    name: 'BENCH',        cost: 60,  price: 0,   capacity: 2,
+    serves: 'energy',  onPath: true },
+  { id: 'bin',      name: 'LITTER BIN',   cost: 40,  price: 0,   capacity: 0,
+    serves: 'litter',  onPath: true }
+];
+function facilityType(id) {
+  for (var i = 0; i < FACILITY_TYPES.length; i++) if (FACILITY_TYPES[i].id === id) return FACILITY_TYPES[i];
+  return null;
 }
 
 /* The build-mode state machine. One armed tool at a time; a stroke is a drag
@@ -1187,9 +1318,11 @@ var build = {
   piece: 'straight'  // selected piece
 };
 function armed() { return !!build.tool; }
-function armTool(id) {
-  build.tool = TOOLS[id] || null;
+function armTool(id) { armToolObj(TOOLS[id] || null); }
+function armToolObj(tool) {
+  build.tool = tool || null;
   build.stroke = null;
+  build.mode = null;
   layoutUI();
 }
 function disarm() { build.tool = null; build.stroke = null; layoutUI(); }
@@ -2259,10 +2392,12 @@ function layoutUI() {
     ui.bottomStack = CH + TH + 14;
     for (var oi = 0; oi < opts.length; oi++) {
       var opt = opts[oi];
-      buttons.push({ id: 'tool_' + opt.id, tool: opt.ride ? null : opt.id,
+      buttons.push({ id: 'tool_' + opt.id, tool: (opt.ride || opt.kind === 'facility') ? null : opt.id,
                      rideType: opt.ride ? opt.ride.id : null,
+                     toolObj: opt.kind === 'facility' ? opt : null,
                      x: cbx + 2 + oi * (TW + 2), y: tby, w: TW, h: TH,
-                     label: opt.label, on: build.tool === opt });
+                     label: opt.label,
+                     on: build.tool && build.tool.id === opt.id });
     }
   }
   if (armed()) {
@@ -2320,6 +2455,21 @@ function layoutUI() {
     closeWinQuiet('test');
   }
 
+  var fw = findWin('fac');
+  if (fw) {
+    var ftile = tileAt(fw.fx, fw.fy);
+    if (ftile && ftile.object && ftile.object.type === 'facility') {
+      var fft = facilityType(ftile.object.fid);
+      if (!fft.onPath) {
+        buttons.push({ id: 'facp_dn', facAct: 'price_dn', x: fw.x + 104, y: fw.y + 15, w: 16, h: 14, label: '-' });
+        buttons.push({ id: 'facp_up', facAct: 'price_up', x: fw.x + 124, y: fw.y + 15, w: 16, h: 14, label: '+' });
+      }
+      buttons.push({ id: 'facbin', facAct: 'demolish', x: fw.x + fw.w - 34, y: fw.y + fw.h - 20, w: 28, h: 16, label: 'BIN' });
+    } else {
+      closeWinQuiet('fac');
+    }
+  }
+
   // per-ride controls hang off whichever detail windows are open
   for (var wj = 0; wj < wins.length; wj++) {
     var rw2 = wins[wj];
@@ -2349,6 +2499,24 @@ function layoutUI() {
                    x: w.x + w.w - 13, y: w.y + 1, w: 11, h: 11, label: 'X' });
   }
 
+}
+
+function facilityAction(act) {
+  var fw = findWin('fac');
+  if (!fw) return;
+  var t = tileAt(fw.fx, fw.fy);
+  if (!t || !t.object || t.object.type !== 'facility') return;
+  var ft = facilityType(t.object.fid);
+  if (act === 'price_up') t.object.price = Math.min(20, t.object.price + 0.1);
+  else if (act === 'price_dn') t.object.price = Math.max(0, t.object.price - 0.1);
+  else if (act === 'demolish') {
+    park.cash += Math.round(ft.cost * 0.5);
+    t.object = null;
+    closeWinQuiet('fac');
+    toast('CLEARED - ' + money(Math.round(ft.cost * 0.5)) + ' BACK');
+  }
+  layoutUI();
+  saveGame();
 }
 
 function rideAction(act, ride) {
@@ -2390,6 +2558,7 @@ function rideAction(act, ride) {
 function pressButton(b) {
   if (b.win) { closeWin(b.win); return; }
   if (b.rideAct) { rideAction(b.rideAct, rideById(b.rideRef)); return; }
+  if (b.facAct) { facilityAction(b.facAct); return; }
   if (b.cat) {                              // a category opens or closes its row
     build.cat = build.cat === b.cat ? null : b.cat;
     if (!build.cat) disarm(); else layoutUI();
@@ -2403,6 +2572,10 @@ function pressButton(b) {
     build.ride = null;
     toast('TAP WHERE THE STATION GOES');
     layoutUI();
+    return;
+  }
+  if (b.toolObj) {
+    if (build.tool && build.tool.id === b.toolObj.id) disarm(); else armToolObj(b.toolObj);
     return;
   }
   if (b.piece) {                            // tap a selected piece again to lay it
@@ -2477,6 +2650,11 @@ function drawObject(g, obj, sx, sy) {
     case 'entrance': img = SPR.deco.entrance; break;
     case 'rideEntrance': img = SPR.deco.rideIn; break;
     case 'rideExit': img = SPR.deco.rideOut; break;
+    case 'facility':
+      if (obj.fid === 'bench') img = SPR.deco.bench;
+      else if (obj.fid === 'bin') img = SPR.deco.bin;
+      else img = SPR.hut[obj.fid];
+      break;
     default: return;
   }
   g.drawImage(img, Math.round(ax - img.width / 2), Math.round(ay - img.height + 3));
@@ -2689,6 +2867,7 @@ function drawSupports(g, setId, p, tint) {
 function buildableHere(t) {
   if (!build.tool) return false;
   if (build.tool.kind === 'land') return t.forSale;
+  if (build.tool.kind === 'facility' && build.tool.facility.onPath) return !!t.path;
   return t.owned;
 }
 
@@ -3036,6 +3215,53 @@ function openRideWin(ride) {
       }
     }
   });
+}
+
+function openFacilityWin(x, y) {
+  var tile = tileAt(x, y);
+  if (!tile || !tile.object || tile.object.type !== 'facility') return;
+  var ft = facilityType(tile.object.fid);
+  openWin({
+    id: 'fac', title: ft.name, w: 172, h: 13 + 58, fx: x, fy: y,
+    draw: function (g, win) {
+      var t2 = tileAt(win.fx, win.fy);
+      if (!t2 || !t2.object || t2.object.type !== 'facility') return;
+      var f = facilityType(t2.object.fid), o = t2.object;
+      var px = win.x + 6, py = win.y + 17;
+      if (!f.onPath) {
+        text(g, 'PRICE', px, py, PAL.uiDim);
+        text(g, '£' + o.price.toFixed(2), px + 48, py, PAL.uiText);
+        py += 10;
+        text(g, 'QUEUE', px, py, PAL.uiDim);
+        text(g, String(o.queue.length) + ' OF ' + f.capacity, px + 48, py, PAL.uiText);
+        py += 10;
+        text(g, 'TAKEN', px, py, PAL.uiDim);
+        text(g, money(o.takings), px + 48, py, PAL.uiText);
+        py += 11;
+      } else {
+        text(g, f.serves === 'litter' ? 'KEEPS THE PATH TIDY' : 'SOMEWHERE TO SIT',
+             px, py, PAL.uiDim);
+        py += 21;
+      }
+      var reach = facilityReachable(win.fx, win.fy);
+      text(g, reach ? 'JOINED TO THE WAY IN' : 'NOT JOINED TO THE WAY IN',
+           px, py, reach ? '#12401c' : '#7a1f18');
+    }
+  });
+}
+
+/* A shop is reachable if the path at its door is, which is the same rule a
+   ride's entrance answers to. */
+function facilityReachable(x, y) {
+  var t = tileAt(x, y);
+  if (!t) return false;
+  if (t.path) return isConnected(x, y);
+  for (var d = 0; d < 4; d++) {
+    var nx = x + DX[d], ny = y + DY[d];
+    var nb = tileAt(nx, ny);
+    if (nb && nb.path && isConnected(nx, ny)) return true;
+  }
+  return false;
 }
 
 function openParkWin() {
@@ -3444,6 +3670,8 @@ function tap(b, uiPt) {
   if (armed()) return;
   ui.selected = t;
   if (!t) { toast('THAT IS OFF THE MAP'); return; }
+  var tile = tileAt(t.x, t.y);
+  if (tile.object && tile.object.type === 'facility') { openFacilityWin(t.x, t.y); return; }
   openTileWin(t);
 }
 
@@ -3482,7 +3710,11 @@ function serialise() {
     h.push(t.h); w.push(t.water);
     own.push(t.owned ? 1 : 0); sale.push(t.forSale ? 1 : 0);
     surf.push(t.surface === 'sand' ? 1 : 0);
-    if (t.object) objs.push([i, t.object.type, t.object.v || 0]);
+    if (t.object) {
+      objs.push(t.object.type === 'facility'
+        ? [i, 'facility', 0, t.object.fid, t.object.price, t.object.takings || 0, t.object.door || 0]
+        : [i, t.object.type, t.object.v || 0]);
+    }
     if (t.path) paths.push([i, t.path.type, t.path.level, t.path.bridge ? 1 : 0]);
   }
   return {
@@ -3571,7 +3803,13 @@ function applySave(save) {
   }
   for (i = 0; i < save.objects.length; i++) {
     var o = save.objects[i];
-    world.tiles[o[0]].object = { type: o[1], v: o[2] };
+    if (o[1] === 'facility') {
+      world.tiles[o[0]].object = { type: 'facility', fid: o[3], price: o[4],
+                                   takings: o[5] || 0, door: o[6] || 0,
+                                   queue: [], served: 0 };
+    } else {
+      world.tiles[o[0]].object = { type: o[1], v: o[2] };
+    }
   }
   var savedPaths = save.paths || [];
   for (i = 0; i < savedPaths.length; i++) {
