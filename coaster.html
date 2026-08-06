@@ -118,13 +118,15 @@ var MAX_DT  = 0.1;     // clamp so a backgrounded tab doesn't fast-forward
 var SAVE_KEY = 'finley-coaster-park', BEST_KEY = 'finley-coaster-best';
 var ARCHIVE_KEY = 'finley-coaster-park-v1-archive';
 var NOTICE_KEY = 'finley-coaster-v1-notice-seen';
-var SAVE_VERSION = 2;   // 1 was the single-coaster prototype
+var SAVE_VERSION = 3;   // 1 was the single-coaster game, 2 had no paths
 
 var PAL = {
   vd:     '#16202a',   // void beyond the world
   grassL: '#6b9e48', grassM: '#4c7a34', grassD: '#3e6329',
   sandL:  '#d8c89a', sandM: '#c4b183', sandD: '#a8956a',
-  path:   '#b8a882', pathD: '#96886a', pathE: '#8c7f63',
+  path:   '#b8a882', pathD: '#96886a', pathE: '#8c7f63', pathSide: '#6f6550',
+  queue:  '#9fa6ad', queueD: '#848c94', queueE: '#5f666d',
+  handrail: '#dcd6c4', handrailD: '#6e6858',
   water:  '#4a78b0', waterL: '#6b9ad6', waterD: '#35598a',
   foam:   '#a9cdea',
   dirtL:  '#8b6b45', dirtM: '#7a5c3a', dirtD: '#5f4830',
@@ -318,7 +320,7 @@ function diamondSpan(row) {                 // → [x0, width] for row 0..15
   return [14 - r * 2, 4 + r * 4];
 }
 
-var SPR = { grass: {}, sand: {}, water: {}, face: {}, fence: {}, tree: [], deco: {} };
+var SPR = { grass: {}, sand: {}, water: {}, path: {}, face: {}, fence: {}, tree: [], deco: {} };
 
 function tone3(hex, out, f) {
   var c = shadeHex(hex, f);
@@ -471,6 +473,105 @@ function fenceSprite(edge) {
   }
   SPR.fence[edge] = t.c;
   return t.c;
+}
+
+/* Path surfaces. `mask` marks which screen edges have no path next door, so
+   those get a kerb — the sprite is chosen by its neighbours, which is what
+   makes a drawn run read as one connected thing. Bits: 1 up-left, 2 up-right,
+   4 down-left, 8 down-right. */
+function makePathTop(kind, mask, seed) {
+  var t = newCanvas(32, 16), g = t.g, rnd = mulberry32(seed + mask * 977);
+  var queue = kind === 'queue';
+  var base = queue ? PAL.queue : PAL.path;
+  var dark = queue ? PAL.queueD : PAL.pathD;
+  var edge = queue ? PAL.queueE : PAL.pathE;
+
+  for (var y = 0; y < 16; y++) {
+    var sp = diamondSpan(y), x0 = sp[0], x1 = sp[0] + sp[1] - 1;
+    for (var x = x0; x <= x1; x++) {
+      var v = rnd(), col = base;
+      if (v < 0.18) col = dark;
+      else if (v < 0.24) col = edge;
+      g.fillStyle = col;
+      g.fillRect(x, y, 1, 1);
+    }
+    var up = y < 8;
+    var leftBit = up ? 1 : 4, rightBit = up ? 2 : 8;
+    // a queue is a narrower ribbon: its verges are always dark
+    if (queue) {
+      g.fillStyle = edge;
+      g.fillRect(x0, y, 3, 1);
+      g.fillRect(x1 - 2, y, 3, 1);
+    }
+    if (mask & leftBit)  { g.fillStyle = edge; g.fillRect(x0, y, 2, 1); }
+    if (mask & rightBit) { g.fillStyle = edge; g.fillRect(x1 - 1, y, 2, 1); }
+  }
+
+  // railings down the open sides of a queue line
+  if (queue) {
+    for (y = 0; y < 16; y++) {
+      var sp2 = diamondSpan(y), a = sp2[0], b = sp2[0] + sp2[1] - 1;
+      var up2 = y < 8;
+      if (mask & (up2 ? 1 : 4)) {
+        g.fillStyle = PAL.handrailD; g.fillRect(a, y - 4, 1, 4);
+        g.fillStyle = PAL.handrail;  g.fillRect(a, y - 4, 1, 1);
+        if (y % 4 === 0) { g.fillStyle = PAL.handrail; g.fillRect(a, y - 4, 1, 3); }
+      }
+      if (mask & (up2 ? 2 : 8)) {
+        g.fillStyle = PAL.handrailD; g.fillRect(b, y - 4, 1, 4);
+        g.fillStyle = PAL.handrail;  g.fillRect(b, y - 4, 1, 1);
+        if (y % 4 === 2) { g.fillStyle = PAL.handrail; g.fillRect(b, y - 4, 1, 3); }
+      }
+    }
+  }
+  return t.c;
+}
+function pathSprite(kind, mask) {
+  var key = kind + '|' + mask;
+  if (!SPR.path[key]) SPR.path[key] = makePathTop(kind, mask, 4242);
+  return SPR.path[key];
+}
+
+/* A ramp is the flat tile with every pixel lifted by how far along the rise it
+   sits, plus a filled side under the raised end. Written generically against a
+   corner-height plane so terrain slopes can use it later. */
+function makeRamp(flat, dir) {
+  var src = flat.getContext('2d').getImageData(0, 0, 32, 16).data;
+  var t = newCanvas(32, 16 + ZH + 4), g = t.g;
+  var bottom = [], lowest = [];
+  var x, y, i;
+  for (x = 0; x < 32; x++) { bottom[x] = -1; lowest[x] = -1; }
+
+  for (y = 0; y < 16; y++) {
+    for (x = 0; x < 32; x++) {
+      i = (y * 32 + x) * 4;
+      if (src[i + 3] < 8) continue;
+      var u = (x - 16) / 32 + y / 16;
+      var v = y / 16 - (x - 16) / 32;
+      var f = dir === 0 ? u : dir === 1 ? v : dir === 2 ? (1 - u) : (1 - v);
+      f = clamp(f, 0, 1);
+      var dy = Math.round(f * ZH);
+      var ty = y + ZH - dy;
+      g.fillStyle = 'rgb(' + src[i] + ',' + src[i + 1] + ',' + src[i + 2] + ')';
+      g.fillRect(x, ty, 1, dy > 0 ? 3 : 1);      // taller bars close the stair gaps
+      if (ty > lowest[x]) lowest[x] = ty;
+      bottom[x] = y + ZH;
+    }
+  }
+  // the exposed side under the lifted end
+  for (x = 0; x < 32; x++) {
+    if (lowest[x] < 0 || bottom[x] <= lowest[x]) continue;
+    g.fillStyle = PAL.pathSide;
+    g.fillRect(x, lowest[x] + 1, 1, bottom[x] - lowest[x]);
+    g.fillStyle = PAL.shadow;
+    g.fillRect(x, bottom[x], 1, 1);
+  }
+  return t.c;
+}
+function rampSprite(kind, mask, dir) {
+  var key = 'r' + kind + '|' + mask + '|' + dir;
+  if (!SPR.path[key]) SPR.path[key] = makeRamp(pathSprite(kind, mask), dir);
+  return SPR.path[key];
 }
 
 function makeSign() {
@@ -698,6 +799,7 @@ function generateWorld(seed) {
   world.entrance = { x: ex, y: ey };
   t = world.tiles[idx(ex, ey)];
   t.object = { type: 'entrance' };
+  t.path = { type: 'foot', level: t.h, bridge: false };   // the graph needs a root
 
   // trees on unowned land, sparsely, never on water or sand
   for (var k = 0; k < 4200; k++) {
@@ -740,11 +842,14 @@ function landPrice() {
    guest pathfinder and the ride connectivity check both read it. */
 
 var pathGraph = { nodes: {}, dirty: true };
+var connected = {};        // path tiles reachable on foot from the way in
 
 function pathKey(x, y) { return x + ',' + y; }
-function walkable(a, b) {                       // two adjacent path tiles
+/* Two adjacent path tiles join if they are within one height level of each
+   other. That single rule is what makes slopes, steps and bridges work. */
+function walkable(a, b) {
   if (!a || !b || !a.path || !b.path) return false;
-  return Math.abs(a.h - b.h) <= 1;              // paths may step one level
+  return Math.abs(a.path.level - b.path.level) <= 1;
 }
 function rebuildPathGraph() {
   var nodes = {};
@@ -762,9 +867,183 @@ function rebuildPathGraph() {
   }
   pathGraph.nodes = nodes;
   pathGraph.dirty = false;
+  computeConnectivity();
+}
+
+/* Breadth-first from the way in. Anything it does not reach is orphaned, and
+   nothing orphaned may ever open — so this is the answer to "why will my ride
+   not open", and the overlay draws it straight from here. */
+function computeConnectivity() {
+  connected = {};
+  var e = world.entrance, start = pathKey(e.x, e.y);
+  if (!pathGraph.nodes[start]) return;
+  var queue = [start];
+  connected[start] = true;
+  while (queue.length) {
+    var cur = queue.shift(), links = pathGraph.nodes[cur] || [];
+    for (var i = 0; i < links.length; i++) {
+      if (!connected[links[i]]) { connected[links[i]] = true; queue.push(links[i]); }
+    }
+  }
+}
+function isConnected(x, y) { return !!connected[pathKey(x, y)]; }
+
+/* ── placing paths ──────────────────────────────────────────────────────
+   A path takes the ground height it sits on, except over water, where it
+   becomes a bridge one level above the surface and grows supports. */
+
+function pathPlan(x, y, typeId) {
+  var t = tileAt(x, y);
+  if (!t) return { ok: false, why: 'OFF THE MAP' };
+  if (!t.owned) return { ok: false, why: 'YOU DO NOT OWN THAT LAND' };
+  var type = PATH_TYPES[typeId];
+  var bridge = isWater(t);
+  var level = bridge ? t.water + 1 : t.h;
+  if (t.object && t.object.type !== 'tree') return { ok: false, why: 'SOMETHING IS IN THE WAY' };
+  if (t.rideId !== null) return { ok: false, why: 'A RIDE IS IN THE WAY' };
+  if (t.path && t.path.type === typeId && t.path.level === level) {
+    return { ok: false, why: 'ALREADY PAVED', silent: true };
+  }
+  return {
+    ok: true, bridge: bridge, level: level,
+    cost: bridge ? type.bridgeCost : type.cost,
+    clearsTree: !!(t.object && t.object.type === 'tree')
+  };
+}
+function placePath(x, y, typeId, plan) {
+  var t = tileAt(x, y);
+  if (plan.clearsTree) t.object = null;
+  t.path = { type: typeId, level: plan.level, bridge: plan.bridge };
+}
+function clearPlan(x, y) {
+  var t = tileAt(x, y);
+  if (!t) return { ok: false, why: 'OFF THE MAP' };
+  if (!t.owned) return { ok: false, why: 'YOU DO NOT OWN THAT LAND' };
+  if (t.object && t.object.type === 'entrance') return { ok: false, why: 'THE WAY IN STAYS', silent: true };
+  if (!t.path && !t.object) return { ok: false, why: 'NOTHING THERE', silent: true };
+  return { ok: true, cost: 0 };
+}
+function doClear(x, y) {
+  var t = tileAt(x, y);
+  t.path = null;
+  if (t.object && t.object.type !== 'entrance') t.object = null;
+}
+function landPlan(x, y) {
+  var t = tileAt(x, y);
+  if (!t) return { ok: false, why: 'OFF THE MAP' };
+  if (t.owned) return { ok: false, why: 'ALREADY YOURS', silent: true };
+  if (!t.forSale) return { ok: false, why: 'NOT FOR SALE' };
+  return { ok: true, cost: landPrice() };
+}
+
+/* The tiles a drag covers: a line bends once along its dominant axis, a
+   rectangle fills. Both are previewed before anything is spent. */
+function strokeTiles(from, to, shape) {
+  var out = [], x, y;
+  if (!from || !to) return out;
+  if (shape === 'rect') {
+    var x0 = Math.min(from.x, to.x), x1 = Math.max(from.x, to.x);
+    var y0 = Math.min(from.y, to.y), y1 = Math.max(from.y, to.y);
+    for (y = y0; y <= y1; y++) for (x = x0; x <= x1; x++) out.push({ x: x, y: y });
+    return out;
+  }
+  var dx = to.x - from.x, dy = to.y - from.y;
+  var stepX = dx > 0 ? 1 : -1, stepY = dy > 0 ? 1 : -1;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    for (x = from.x; x !== to.x + stepX; x += stepX) out.push({ x: x, y: from.y });
+    for (y = from.y + stepY; dy && y !== to.y + stepY; y += stepY) out.push({ x: to.x, y: y });
+  } else {
+    for (y = from.y; y !== to.y + stepY; y += stepY) out.push({ x: from.x, y: y });
+    for (x = from.x + stepX; dx && x !== to.x + stepX; x += stepX) out.push({ x: x, y: to.y });
+  }
+  return out;
+}
+
+/* Price the whole stroke before committing, so the ghost can show the bill. */
+function planStroke() {
+  var st = build.stroke;
+  if (!st || !build.tool) { build.cost = 0; build.ok = false; return; }
+  var tiles = strokeTiles(st.from, st.to, build.tool.drag);
+  var cost = 0, any = false, why = '';
+  st.plans = [];
+  for (var i = 0; i < tiles.length; i++) {
+    var tl = tiles[i], plan;
+    if (build.tool.kind === 'path') plan = pathPlan(tl.x, tl.y, build.tool.pathType);
+    else if (build.tool.kind === 'clear') plan = clearPlan(tl.x, tl.y);
+    else plan = landPlan(tl.x, tl.y);
+    plan.x = tl.x; plan.y = tl.y;
+    st.plans.push(plan);
+    if (plan.ok) { cost += plan.cost || 0; any = true; }
+    else if (!plan.silent && !why) why = plan.why;
+  }
+  st.tiles = tiles;
+  build.cost = cost;
+  build.ok = any && cost <= park.cash;
+  build.why = !any ? (why || 'NOTHING TO DO HERE') : (cost > park.cash ? 'NOT ENOUGH MONEY' : '');
+}
+
+function commitStroke() {
+  var st = build.stroke;
+  if (!st || !st.plans) { build.stroke = null; return; }
+  if (!build.ok) {
+    if (build.why) toast(build.why);
+    build.stroke = null;
+    return;
+  }
+  var spent = 0, n = 0;
+  for (var i = 0; i < st.plans.length; i++) {
+    var plan = st.plans[i];
+    if (!plan.ok) continue;
+    if (spent + (plan.cost || 0) > park.cash) break;
+    if (build.tool.kind === 'path') placePath(plan.x, plan.y, build.tool.pathType, plan);
+    else if (build.tool.kind === 'clear') doClear(plan.x, plan.y);
+    else { tileAt(plan.x, plan.y).owned = true; tileAt(plan.x, plan.y).forSale = false; }
+    spent += plan.cost || 0;
+    n++;
+  }
+  park.cash -= spent;
+  if (build.tool.kind === 'land') {
+    park.owned = ownedCount();
+    toast('BOUGHT ' + n + ' TILES FOR ' + money(spent));
+  } else if (spent > 0) {
+    toast(money(spent));
+  }
+  build.stroke = null;
+  rebuildPathGraph();
+  saveGame();
 }
 
 var DX = [1, 0, -1, 0], DY = [0, 1, 0, -1];
+
+var PATH_TYPES = {
+  foot:  { id: 'foot',  name: 'FOOTPATH',   cost: 12, bridgeCost: 32 },
+  queue: { id: 'queue', name: 'QUEUE LINE', cost: 8,  bridgeCost: 26 }
+};
+
+/* Everything you can arm and drag with. Rides and facilities join this table
+   in later phases rather than growing a second placement path. */
+var TOOLS = {
+  foot:  { id: 'foot',  cat: 'PATHS', label: 'FOOT',  kind: 'path', pathType: 'foot',
+           drag: 'line', tint: '#f0c040', hint: 'FOOTPATH' },
+  queue: { id: 'queue', cat: 'PATHS', label: 'QUEUE', kind: 'path', pathType: 'queue',
+           drag: 'line', tint: '#48b6e8', hint: 'QUEUE LINE' },
+  clear: { id: 'clear', cat: 'PATHS', label: 'CLEAR', kind: 'clear',
+           drag: 'line', tint: '#e06a4a', hint: 'CLEAR PATHS AND TREES' },
+  land:  { id: 'land',  cat: 'LAND',  label: 'BUY',   kind: 'land',
+           drag: 'rect', tint: '#3fd94e', hint: 'BUY LAND' }
+};
+var CATEGORIES = ['PATHS', 'LAND'];
+
+/* The build-mode state machine. One armed tool at a time; a stroke is a drag
+   in progress. Ride construction reuses this in phase 4. */
+var build = { tool: null, cat: null, stroke: null, cost: 0, ok: false };
+function armed() { return !!build.tool; }
+function armTool(id) {
+  build.tool = TOOLS[id] || null;
+  build.stroke = null;
+  layoutUI();
+}
+function disarm() { build.tool = null; build.stroke = null; layoutUI(); }
 
 /* ═══════════════════════════ rides ═══════════════════════════
    RIDE_TYPES is a data table, not a set of branches. Every number the
@@ -1014,6 +1293,7 @@ function hitButton(bx, by) {
 var ui = {
   selected: null,
   showHelp: false,
+  showLinks: false,
   notice: null,
   toast: '', toastT: 0,
   waterFrame: 0, waterT: 0
@@ -1045,10 +1325,37 @@ function layoutUI() {
   ui.camPanel = { x: cx, y: cy, w: cw, h: ch };
 
   var ry = cy - H - 8;
-  buttons.push({ id: 'help', x: right - B - 3, y: ry, w: B, h: H, label: '?', on: ui.showHelp });
+  buttons.push({ id: 'links', x: right - B * 2 - 5, y: ry, w: B, h: H, label: 'LNK', on: ui.showLinks });
+  buttons.push({ id: 'help',  x: right - B - 3,     y: ry, w: B, h: H, label: '?',   on: ui.showHelp });
+
+  // build menu: a row of categories, and the options for the open one above it
+  var CW = 54, CH = 22, cbx = 4, cby = bottom - CH;
+  ui.catBar = { x: cbx, y: cby, w: CATEGORIES.length * (CW + 2) + 4, h: CH + 4 };
+  for (var ci = 0; ci < CATEGORIES.length; ci++) {
+    buttons.push({ id: 'cat_' + CATEGORIES[ci], cat: CATEGORIES[ci],
+                   x: cbx + 2 + ci * (CW + 2), y: cby + 2, w: CW, h: CH,
+                   label: CATEGORIES[ci], on: build.cat === CATEGORIES[ci] });
+  }
+  ui.bottomStack = CH + 8;
+  ui.toolBar = null;
+  if (build.cat) {
+    var opts = [];
+    for (var k in TOOLS) if (TOOLS[k].cat === build.cat) opts.push(TOOLS[k]);
+    var TW = 54, TH = 22, tby = cby - TH - 6;
+    ui.toolBar = { x: cbx, y: tby - 2, w: opts.length * (TW + 2) + 4, h: TH + 4, opts: opts };
+    ui.bottomStack = CH + TH + 14;
+    for (var oi = 0; oi < opts.length; oi++) {
+      buttons.push({ id: 'tool_' + opts[oi].id, tool: opts[oi].id,
+                     x: cbx + 2 + oi * (TW + 2), y: tby, w: TW, h: TH,
+                     label: opts[oi].label, on: build.tool === opts[oi] });
+    }
+  }
+  if (armed()) {
+    buttons.push({ id: 'done', x: uiW - 52 - 4, y: 19, w: 52, h: 18, label: 'DONE' });
+  }
 
   if (ui.showHelp) {
-    var hw = Math.min(uiW - 16, 218), hh = 96;
+    var hw = Math.min(uiW - 16, 218), hh = 126;
     ui.helpWin = { x: (uiW - hw) >> 1, y: Math.max(20, (uiH - hh) >> 1), w: hw, h: hh };
   } else {
     ui.helpWin = null;
@@ -1056,12 +1363,23 @@ function layoutUI() {
 }
 
 function pressButton(b) {
+  if (b.cat) {                              // a category opens or closes its row
+    build.cat = build.cat === b.cat ? null : b.cat;
+    if (!build.cat) disarm(); else layoutUI();
+    return;
+  }
+  if (b.tool) {                             // arming and disarming the same way
+    if (build.tool === TOOLS[b.tool]) disarm(); else armTool(b.tool);
+    return;
+  }
   switch (b.id) {
     case 'zoomin':  setZoom(zoomIdx + 1); break;
     case 'zoomout': setZoom(zoomIdx - 1); break;
     case 'rotate':  rotate(1); break;
     case 'help':    ui.showHelp = !ui.showHelp; layoutUI(); break;
+    case 'links':   ui.showLinks = !ui.showLinks; layoutUI(); break;
     case 'notice_ok': dismissNotice(); break;
+    case 'done':    disarm(); break;
   }
 }
 
@@ -1151,6 +1469,32 @@ function drawWorld(g) {
         g.drawImage(sg, sx + 16 - (sg.width >> 1), sy + 8 - sg.height + 3);
       }
 
+      // paths sit at their own level, which is how bridges clear the water
+      if (t.path) {
+        var psy = (rx + ry) * HH - t.path.level * ZH + cam.y;
+        var mask = pathMask(t, rx, ry);
+        var up = rampDir(t, rx, ry);
+        if (t.path.bridge) drawBridgeSupports(g, t, sx, psy);
+        if (up >= 0) g.drawImage(rampSprite(t.path.type, mask, up), sx, psy - ZH);
+        else g.drawImage(pathSprite(t.path.type, mask), sx, psy);
+        if (ui.showLinks) {
+          g.globalAlpha = 0.45;
+          g.fillStyle = isConnected(w.x, w.y) ? PAL.ghostOK : PAL.ghostNo;
+          for (var oy = 0; oy < 16; oy++) {
+            var osp = diamondSpan(oy);
+            g.fillRect(sx + osp[0], psy + oy, osp[1], 1);
+          }
+          g.globalAlpha = 1;
+        }
+      }
+
+      // a faint grid over everything you are allowed to build on
+      if (armed() && buildableHere(t)) {
+        g.globalAlpha = 0.22;
+        drawTileOutline(g, sx, sy, build.tool.tint);
+        g.globalAlpha = 1;
+      }
+
       if (ui.selected && ui.selected.x === w.x && ui.selected.y === w.y) {
         drawTileOutline(g, sx, sy, '#ffffff');
       }
@@ -1158,6 +1502,48 @@ function drawWorld(g) {
       if (t.object) drawObject(g, t.object, sx, sy);
     }
   }
+}
+
+var SCREEN_BIT = [8, 4, 2, 1];      // +rx, +ry, -rx, -ry
+function screenNeighbour(rx, ry, e) {
+  var nx = rx + (e === 0 ? 1 : e === 2 ? -1 : 0);
+  var ny = ry + (e === 1 ? 1 : e === 3 ? -1 : 0);
+  if (nx < 0 || ny < 0 || nx >= WORLD || ny >= WORLD) return null;
+  var w = unrot(nx, ny);
+  return world.tiles[idx(w.x, w.y)];
+}
+/* Which screen edges have no path next door — the kerb mask — and which
+   neighbour, if any, this tile ramps up to. */
+function pathMask(t, rx, ry) {
+  var mask = 0;
+  for (var e = 0; e < 4; e++) {
+    var nb = screenNeighbour(rx, ry, e);
+    if (!nb || !nb.path || Math.abs(nb.path.level - t.path.level) > 1) mask |= SCREEN_BIT[e];
+  }
+  return mask;
+}
+function rampDir(t, rx, ry) {
+  for (var e = 0; e < 4; e++) {
+    var nb = screenNeighbour(rx, ry, e);
+    if (nb && nb.path && nb.path.level === t.path.level + 1) return e;
+  }
+  return -1;
+}
+function drawBridgeSupports(g, t, sx, sy) {
+  var deep = (t.path.level - t.h) * ZH;
+  if (deep <= 0) return;
+  g.fillStyle = PAL.postD;
+  g.fillRect(sx + 9, sy + 10, 2, deep);
+  g.fillRect(sx + 21, sy + 10, 2, deep);
+  g.fillStyle = PAL.post;
+  g.fillRect(sx + 9, sy + 10, 1, deep);
+  g.fillRect(sx + 21, sy + 10, 1, deep);
+}
+
+function buildableHere(t) {
+  if (!build.tool) return false;
+  if (build.tool.kind === 'land') return t.forSale;
+  return t.owned;
 }
 
 function neighbourR(rx, ry) {                 // neighbour in rotated space
@@ -1174,6 +1560,30 @@ function frontier(x, y) {
     if (nb && nb.owned) return true;
   }
   return false;
+}
+
+/* The stroke you are about to commit, tile by tile, green where it will take
+   and red where it will not. */
+function drawStrokeGhost(g) {
+  var st = build.stroke;
+  if (!st || !st.plans) return;
+  for (var i = 0; i < st.plans.length; i++) {
+    var plan = st.plans[i];
+    var rx = rotX(plan.x, plan.y), ry = rotY(plan.x, plan.y);
+    var t = tileAt(plan.x, plan.y);
+    var lvl = plan.ok && plan.level !== undefined ? plan.level : surfaceLevel(t);
+    var sx = (rx - ry) * HW + cam.x;
+    var sy = (rx + ry) * HH - lvl * ZH + cam.y;
+    var col = plan.ok ? PAL.ghostOK : PAL.ghostNo;
+    g.globalAlpha = plan.ok ? 0.55 : 0.4;
+    for (var oy = 0; oy < 16; oy++) {
+      var osp = diamondSpan(oy);
+      g.fillRect(sx + osp[0], sy + oy, osp[1], 1);
+    }
+    g.globalAlpha = 1;
+    g.fillStyle = col;
+    drawTileOutline(g, sx, sy, col);
+  }
 }
 
 function drawInfoWindow(g) {
@@ -1194,7 +1604,7 @@ function drawInfoWindow(g) {
   for (var i = 0; i < body.length; i++) w = Math.max(w, textW(body[i]));
   w = Math.min(uiW - 8, Math.max(w, textW(title) + 20) + 10);
   var h = 13 + body.length * 10 + 4;
-  var x = 4, y = uiH - h - 4;
+  var x = 4, y = uiH - h - 4 - (ui.bottomStack || 0);
   windowFrame(g, x, y, w, h, title);
   for (i = 0; i < body.length; i++) {
     text(g, body[i], x + 5, y + 17 + i * 10, i === 0 ? PAL.uiText : PAL.uiDim);
@@ -1208,10 +1618,13 @@ function drawHelpWindow(g) {
     'DRAG       PAN THE PARK',
     'PINCH      ZOOM IN AND OUT',
     'RO         TURN THE VIEW',
-    'TAP        INSPECT A TILE',
+    'LNK        SHOW WHAT CONNECTS',
     '',
-    'GREEN LAND IS YOURS. THE PALE',
-    'GROUND OUTSIDE IS UP FOR SALE.'
+    'PICK A TOOL AND THE VIEW GETS A',
+    'COLOURED BORDER. THEN ONE FINGER',
+    'DRAWS AND TWO FINGERS PAN.',
+    'PATHS STEP UP AND DOWN A LEVEL',
+    'AND BRIDGE STRAIGHT OVER WATER.'
   ];
   windowFrame(g, win.x, win.y, win.w, win.h, 'HOW TO PLAY');
   for (var i = 0; i < lines.length; i++) {
@@ -1256,6 +1669,34 @@ function drawNotice(g) {
   }
 }
 
+/* Being armed has to be obvious at arm's length on a tablet: a coloured
+   border round the whole view, a banner saying what one finger will do, and
+   the bill for the stroke in progress. */
+function drawArmedChrome(g) {
+  if (!armed()) return;
+  var c = build.tool.tint;
+  g.fillStyle = c;
+  g.fillRect(0, 15, uiW, 2);
+  g.fillRect(0, uiH - 2, uiW, 2);
+  g.fillRect(0, 15, 2, uiH - 15);
+  g.fillRect(uiW - 2, 15, 2, uiH - 15);
+
+  var label = build.tool.hint;
+  var line = build.stroke && build.stroke.tiles
+    ? label + '  ' + build.stroke.tiles.length + ' TILES  ' + money(build.cost)
+    : label + '  1 FINGER DRAWS - 2 PANS';
+  var w = Math.min(uiW - 62, textW(line) + 12);
+  panel(g, 2, 17, w, 15);
+  g.fillStyle = c;
+  g.fillRect(2, 17, 3, 15);
+  text(g, line, 8, 21, PAL.uiText);
+  if (build.stroke && build.why) {
+    var ww = Math.min(uiW - 8, textW(build.why) + 12);
+    panel(g, 2, 34, ww, 14);
+    text(g, build.why, 8, 38, '#7a1f18');
+  }
+}
+
 function drawUI(g) {
   if (ui.notice) {
     drawStatusBar(g);
@@ -1264,8 +1705,18 @@ function drawUI(g) {
     return;
   }
   drawStatusBar(g);
-  drawInfoWindow(g);
+  drawArmedChrome(g);
+  if (!armed()) drawInfoWindow(g);
   if (ui.showHelp) drawHelpWindow(g);
+
+  if (ui.toolBar) panel(g, ui.toolBar.x, ui.toolBar.y, ui.toolBar.w, ui.toolBar.h);
+  if (ui.catBar) panel(g, ui.catBar.x, ui.catBar.y, ui.catBar.w, ui.catBar.h);
+  if (build.cat === 'LAND' && ui.toolBar) {
+    var lp = 'LAND ' + money(landPrice()) + ' A TILE';
+    var lw = textW(lp) + 12;
+    panel(g, ui.toolBar.x, ui.toolBar.y - 17, lw, 15);
+    text(g, lp, ui.toolBar.x + 6, ui.toolBar.y - 13, PAL.uiText);
+  }
 
   var p = ui.camPanel;
   if (p) panel(g, p.x, p.y, p.w, p.h);
@@ -1278,6 +1729,7 @@ function render() {
   bctx.fillStyle = PAL.vd;
   bctx.fillRect(0, 0, bufW, bufH);
   drawWorld(bctx);
+  drawStrokeGhost(bctx);
 
   uctx.clearRect(0, 0, uiW, uiH);
   drawUI(uctx);
@@ -1323,10 +1775,21 @@ function onDown(e) {
     var u = toUI(e);
     var hit = hitButton(u.x, u.y);
     if (hit) { hit.pressed = true; pointers.get(e.pointerId).btn = hit; }
+    else if (armed()) {
+      // armed: one finger draws rather than pans
+      var tl = pickTile(b.x, b.y);
+      if (tl) {
+        pointers.get(e.pointerId).drawing = true;
+        build.stroke = { from: tl, to: tl, plans: null };
+        planStroke();
+      }
+    }
   } else if (pointers.size === 2) {
     var ps = Array.from(pointers.values());
+    // a second finger means pan and zoom, so any stroke in progress is dropped
+    build.stroke = null;
     ps.forEach(function (p) {
-      p.moved = true;
+      p.moved = true; p.drawing = false;
       if (p.btn) { p.btn.pressed = false; p.btn = null; }
     });
     pinch = { dist: dist(ps[0], ps[1]), zoom: zoomIdx, mid: midBuf(ps[0], ps[1]) };
@@ -1380,6 +1843,16 @@ function onMove(e) {
     return;
   }
 
+  if (p.drawing && build.stroke) {
+    var tl = pickTile(toBuf(e).x, toBuf(e).y);
+    if (tl && (tl.x !== build.stroke.to.x || tl.y !== build.stroke.to.y)) {
+      build.stroke.to = tl;
+      planStroke();
+    }
+    e.preventDefault();
+    return;                                   // drawing never pans
+  }
+
   if (pointers.size === 1 && p.moved) {
     var r = disp.getBoundingClientRect();
     var k = (disp.width / r.width) / scale;
@@ -1402,6 +1875,11 @@ function onUp(e) {
     e.preventDefault();
     return;
   }
+  if (p.drawing) {                            // a tap while armed is a one-tile stroke
+    commitStroke();
+    e.preventDefault();
+    return;
+  }
   if (!p.moved && performance.now() - p.t < TAP_MS) tap(toBuf(e));
   e.preventDefault();
 }
@@ -1409,12 +1887,13 @@ function onUp(e) {
 function onCancel(e) {
   var p = pointers.get(e.pointerId);
   if (p && p.btn) p.btn.pressed = false;
+  if (p && p.drawing) build.stroke = null;
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
 }
 
 function tap(b) {
-  if (ui.notice) return;
+  if (ui.notice || armed()) return;
   var t = pickTile(b.x, b.y);
   ui.selected = t;
   if (!t) toast('THAT IS OFF THE MAP');
@@ -1449,18 +1928,19 @@ window.addEventListener('blur', function () { keys = {}; });
    at, so a save from an older schema can never half-load. */
 
 function serialise() {
-  var h = [], w = [], own = [], sale = [], surf = [], objs = [];
+  var h = [], w = [], own = [], sale = [], surf = [], objs = [], paths = [];
   for (var i = 0; i < world.tiles.length; i++) {
     var t = world.tiles[i];
     h.push(t.h); w.push(t.water);
     own.push(t.owned ? 1 : 0); sale.push(t.forSale ? 1 : 0);
     surf.push(t.surface === 'sand' ? 1 : 0);
     if (t.object) objs.push([i, t.object.type, t.object.v || 0]);
+    if (t.path) paths.push([i, t.path.type, t.path.level, t.path.bridge ? 1 : 0]);
   }
   return {
     v: SAVE_VERSION,
     world: WORLD,
-    h: h, water: w, owned: own, sale: sale, surf: surf, objects: objs,
+    h: h, water: w, owned: own, sale: sale, surf: surf, objects: objs, paths: paths,
     entrance: world.entrance,
     park: { cash: park.cash, day: park.day, month: park.month, year: park.year,
             rating: park.rating, entryFee: park.entryFee },
@@ -1473,7 +1953,11 @@ function migrate(save) {
   if (!save || typeof save !== 'object') return null;
   if (save.v === undefined) return null;          // pre-versioned: not ours
   if (save.v === 1) return null;                  // prototype schema: nothing to carry
-  // future: if (save.v === 2) { ...upgrade to 3...; save.v = 3; }
+  if (save.v === 2) {                             // 2 → 3: paths arrived
+    save.paths = [];
+    save.v = 3;
+  }
+  // future: if (save.v === 3) { ...upgrade to 4...; save.v = 4; }
   if (save.v !== SAVE_VERSION) return null;
   if (save.world !== WORLD) return null;          // world resized under it
   if (!save.h || save.h.length !== WORLD * WORLD) return null;
@@ -1494,6 +1978,11 @@ function applySave(save) {
   for (i = 0; i < save.objects.length; i++) {
     var o = save.objects[i];
     world.tiles[o[0]].object = { type: o[1], v: o[2] };
+  }
+  var savedPaths = save.paths || [];
+  for (i = 0; i < savedPaths.length; i++) {
+    var pth = savedPaths[i];
+    world.tiles[pth[0]].path = { type: pth[1], level: pth[2], bridge: !!pth[3] };
   }
   world.entrance = save.entrance || { x: WORLD >> 1, y: WORLD >> 1 };
   park.cash = save.park.cash;
