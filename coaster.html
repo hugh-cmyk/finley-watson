@@ -1654,6 +1654,25 @@ function canOpen(ride) {
   if (!doorReachable(ride.exitTile)) return 'THE WAY OUT IS NOT CONNECTED TO THE PARK ENTRANCE';
   return null;
 }
+/* An open ride that nobody will queue for looks exactly like a broken one, so
+   say which it is. Read straight from the tolerances guests are built with. */
+function intensityWarning(ride) {
+  if (!ride.tested) return null;
+  var it = ride.ratings.intensity;
+  if (it > UNRIDEABLE) return 'TOO FIERCE: NOBODY WILL RIDE';
+  if (it > BOLDEST) return 'ONLY THE BOLDEST WILL RIDE IT';
+  return null;
+}
+/* The ride window grows to fit whatever it has to say. Layout and drawing both
+   ask this, so the buttons never sit a frame behind the box they hang off. */
+function rideWinHeight(ride, w) {
+  var wrapAt = Math.floor((w - 12) / ADV);
+  var fierce = intensityWarning(ride);
+  var why = ride.status !== 'open' ? canOpen(ride) : null;
+  var fr = fierce ? Math.min(2, wrapText(fierce, wrapAt).length) : 0;
+  var wr = why ? Math.min(2, wrapText(why, wrapAt).length) : 0;
+  return 118 + fr * 9 + (fr ? 2 : 0) + wr * 9;
+}
 function rideStatusText(ride) {
   if (sim.active && sim.ride === ride) return 'TESTING';
   if (ride.status === 'open') return 'OPEN';
@@ -2114,6 +2133,13 @@ var NEEDS = {                            // units per second
   hunger: 0.55, thirst: 0.8, bladder: 0.45, energy: -0.35, nausea: -0.9
 };
 
+/* How fierce a ride a guest will accept. Guest generation, ride choice and the
+   warning in the ride window all read these, so a coaster too fierce for
+   anybody says so instead of standing there empty with no explanation. */
+var TOLERANCE = { prefFrom: 2, prefSpan: 7, over: 4 };
+var BOLDEST = TOLERANCE.prefFrom + TOLERANCE.prefSpan;   // the bravest guest there is
+var UNRIDEABLE = BOLDEST + TOLERANCE.over;               // above this, nobody at all
+
 function spawnGuest() {
   var rnd = Math.random;
   var e = world.entrance;
@@ -2125,7 +2151,7 @@ function spawnGuest() {
     bladder: rnd() * 20, nausea: 0, wetness: 0,
     money: 12 + rnd() * 40, patience: 40 + rnd() * 60,
     nauseaTolerance: 25 + rnd() * 55,
-    intensityPreference: 2 + rnd() * 7,
+    intensityPreference: TOLERANCE.prefFrom + rnd() * TOLERANCE.prefSpan,
     ridden: {}, spent: 0,
     thought: '', thoughtT: 0,
     shirt: SHIRTS[(rnd() * SHIRTS.length) | 0],
@@ -2193,8 +2219,7 @@ function rideScore(g, ride) {
   if (ride.status !== 'open' || !ride.tested) return -1;
   if (!doorReachable(ride.entranceTile)) return -1;
   var r = ride.ratings;
-  if (r.intensity >= 10) return -1;
-  if (r.intensity > g.intensityPreference + 4) return -1;
+  if (r.intensity > g.intensityPreference + TOLERANCE.over) return -1;
   if (ride.ticketPrice > g.money) return -1;
   if (ride.queue.length >= 24) return -1;
 
@@ -3129,6 +3154,7 @@ function layoutUI() {
     if (rw2.id.indexOf('ride_') !== 0) continue;
     var r2 = rideById(rw2.ride);
     if (!r2) continue;
+    rw2.h = rideWinHeight(r2, rw2.w);
     var by = rw2.y + rw2.h - 40;
     buttons.push({ id: 'price_dn_' + r2.id, rideAct: 'price_dn', rideRef: r2.id,
                    x: rw2.x + 110, y: rw2.y + 61, w: 16, h: 14, label: '-' });
@@ -3889,30 +3915,45 @@ function openRidesWin() {
 
 function openRideWin(ride) {
   openWin({
-    id: 'ride_' + ride.id, title: ride.name.slice(0, 22), w: 186, h: 13 + 96,
+    id: 'ride_' + ride.id, title: ride.name.slice(0, 22), w: 186, h: 118,
     x: 170, y: 120,
     ride: ride.id,
     draw: function (g, win) {
       var r = rideById(win.ride);
       if (!r) return;
+      var fierceMsg = intensityWarning(r);
+      var whyMsg = r.status !== 'open' ? canOpen(r) : null;
+      var wrapAt = Math.floor((win.w - 12) / ADV);
+      var fierceRows = fierceMsg ? Math.min(2, wrapText(fierceMsg, wrapAt).length) : 0;
+      var whyRows = whyMsg ? Math.min(2, wrapText(whyMsg, wrapAt).length) : 0;
+      win.h = rideWinHeight(r, win.w);
+
       var x = win.x + 6, y = win.y + 17;
       text(g, 'STATUS', x, y, PAL.uiDim);
       text(g, rideStatusText(r), x + 50, y, PAL.uiText); y += 10;
       if (r.tested) {
         text(g, 'EXCITE', x, y, PAL.uiDim); text(g, r.ratings.excitement.toFixed(2), x + 50, y, PAL.uiText); y += 9;
         text(g, 'INTENSE', x, y, PAL.uiDim); text(g, r.ratings.intensity.toFixed(2), x + 50, y,
-             r.ratings.intensity >= 10 ? '#7a1f18' : PAL.uiText); y += 9;
+             r.ratings.intensity > UNRIDEABLE ? '#7a1f18'
+             : r.ratings.intensity > BOLDEST ? '#7a4a10' : PAL.uiText); y += 9;
         text(g, 'NAUSEA', x, y, PAL.uiDim); text(g, r.ratings.nausea.toFixed(2), x + 50, y, PAL.uiText); y += 10;
       } else {
         text(g, 'NOT TESTED YET', x, y, '#7a4a10'); y += 19;
       }
       text(g, 'TICKET', x, y, PAL.uiDim);
       text(g, '£' + r.ticketPrice.toFixed(2), x + 50, y, PAL.uiText);
-      y += 12;
-      var why = canOpen(r);
-      if (why && r.status !== 'open') {
-        var lines = wrapText(why, Math.floor((win.w - 12) / ADV));
-        for (var i = 0; i < Math.min(2, lines.length); i++) {
+      y += 23;                       // clears the price buttons below the row
+      if (fierceRows) {
+        var fl = wrapText(fierceMsg, wrapAt);
+        for (var k = 0; k < fierceRows; k++) {
+          text(g, fl[k], x, y + k * 9, r.ratings.intensity > UNRIDEABLE ? '#7a1f18' : '#7a4a10');
+        }
+        y += fierceRows * 9 + 2;
+      }
+      var why = whyMsg;
+      if (why) {
+        var lines = wrapText(why, wrapAt);
+        for (var i = 0; i < whyRows; i++) {
           text(g, lines[i], x, y + i * 9, '#7a1f18');
         }
       }
