@@ -1647,8 +1647,8 @@ function doorReachable(tile) {
 }
 function canOpen(ride) {
   if (!ride.complete) return 'THE CIRCUIT IS NOT FINISHED';
-  if (!ride.entranceTile) return 'IT NEEDS A WAY IN';
-  if (!ride.exitTile) return 'IT NEEDS A WAY OUT';
+  if (!ride.entranceTile) return 'IT NEEDS A WAY IN: TAP EDIT';
+  if (!ride.exitTile) return 'IT NEEDS A WAY OUT: TAP EDIT';
   if (!ride.tested) return 'IT HAS NOT BEEN TESTED';
   if (ride.stalled) return 'IT STALLED IN SERVICE: TEST IT AGAIN';
   if (!doorReachable(ride.entranceTile)) return 'THE WAY IN IS NOT CONNECTED TO THE PARK ENTRANCE';
@@ -3273,10 +3273,18 @@ function rideAction(act, ride) {
       break;
     case 'build':
       build.ride = ride;
-      build.mode = ride.complete ? 'track' : 'track';
+      /* Door placing is only ever entered the moment the circuit closes, and
+         nothing remembers it across a reload — so a ride left without its
+         doors could never be given any, and never open. Resume at the step
+         it actually needs. */
+      build.mode = !ride.complete ? 'track'
+                 : !ride.entranceTile ? 'entrance'
+                 : !ride.exitTile ? 'exit' : 'track';
       build.piece = PIECE_PALETTES[rideType(ride.typeId).pieceSet][0];
       build.cat = null;
-      toast('EDITING ' + ride.name);
+      toast(build.mode === 'entrance' ? 'NOW THE WAY IN'
+          : build.mode === 'exit' ? 'NOW THE WAY OUT'
+          : 'EDITING ' + ride.name);
       break;
     case 'demolish':
       ui.confirm = { msg: 'DEMOLISH ' + ride.name + '?', act: function () { deleteRide(ride); } };
