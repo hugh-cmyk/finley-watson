@@ -712,6 +712,15 @@ function makeHut(ft) {
   g.fillStyle = '#ffffff'; g.fillRect(17, 17, 5, 1);
   return t.c;
 }
+function makeMess(colour) {
+  var t = newCanvas(10, 5), g = t.g, rnd = mulberry32(colour.length * 977);
+  for (var i = 0; i < 14; i++) {
+    g.fillStyle = rnd() < 0.5 ? colour : shadeHex(colour, 0.75);
+    g.fillRect(1 + (rnd() * 8) | 0, 1 + (rnd() * 3) | 0, 1, 1);
+  }
+  return t.c;
+}
+
 function makeBenchSpr() {
   var t = newCanvas(14, 11), g = t.g;
   g.fillStyle = PAL.woodD; g.fillRect(1, 6, 2, 5); g.fillRect(11, 6, 2, 5);
@@ -814,6 +823,8 @@ function buildSprites() {
   SPR.deco.rideIn = makeDoor('#2f8f3a');
   SPR.deco.rideOut = makeDoor('#a83232');
   SPR.deco.bench = makeBenchSpr();
+  SPR.deco.sick = makeMess('#7f8f3a');
+  SPR.deco.wet = makeMess('#8fa0b8');
   SPR.deco.bin = makeBinSpr();
   SPR.hut = {};
   for (var fi = 0; fi < FACILITY_TYPES.length; fi++) {
@@ -1054,6 +1065,47 @@ function computeConnectivity() {
   }
 }
 function isConnected(x, y) { return !!connected[pathKey(x, y)]; }
+
+/* A walk between two path tiles, breadth-first over the same graph the
+   connectivity sweep uses. Returns the tiles to step through, or null. */
+function route(fx, fy, tx, ty) {
+  var start = pathKey(fx, fy), goal = pathKey(tx, ty);
+  if (!pathGraph.nodes[start] || !pathGraph.nodes[goal]) return null;
+  if (start === goal) return [];
+  var prev = {}, seen = {}, q = [start], head = 0;
+  seen[start] = 1;
+  while (head < q.length) {
+    var cur = q[head++];
+    if (cur === goal) break;
+    var links = pathGraph.nodes[cur] || [];
+    for (var i = 0; i < links.length; i++) {
+      var k = links[i];
+      if (seen[k]) continue;
+      seen[k] = 1; prev[k] = cur; q.push(k);
+    }
+  }
+  if (!seen[goal]) return null;
+  var out = [], node = goal;
+  while (node !== start) {
+    var p = node.split(',');
+    out.unshift({ x: +p[0], y: +p[1] });
+    node = prev[node];
+  }
+  return out;
+}
+
+/* Doors are not path tiles, so a walk to one ends on the path beside it and
+   then takes a single step in. */
+function approachTile(x, y) {
+  var t = tileAt(x, y);
+  if (t && t.path) return { x: x, y: y };
+  for (var d = 0; d < 4; d++) {
+    var nx = x + DX[d], ny = y + DY[d];
+    var nb = tileAt(nx, ny);
+    if (nb && nb.path && isConnected(nx, ny)) return { x: nx, y: ny };
+  }
+  return null;
+}
 
 /* ── placing paths ──────────────────────────────────────────────────────
    A path takes the ground height it sits on, except over water, where it
@@ -2037,6 +2089,485 @@ function buildCarMap() {
   }
 }
 
+/* ═══════════════════════════ guests ═══════════════════════════
+   Guests are a needs clock, a destination and a walk. The expensive part is
+   deciding where to go, so that runs for a rotating slice of the crowd each
+   frame while everyone keeps moving — a hundred and fifty people thinking
+   every frame is what would cost the frame rate, not a hundred and fifty
+   people walking. */
+
+var GUEST_MAX = 150, WALK_SPEED = 1.05;
+var AI_SLICE = 10;                       // guests re-thought per frame
+var guests = [], guestCursor = 0;
+
+var SHIRTS = ['#d84a3c', '#3d7fc4', '#e0b23c', '#5aa84f', '#a85fc4',
+              '#c96bb0', '#4fb3a8', '#e07a2f'];
+var SKINS = ['#e8c49a', '#c98f5f', '#8d5a37', '#f0d3b0'];
+
+var NEEDS = {                            // units per second
+  hunger: 0.55, thirst: 0.8, bladder: 0.45, energy: -0.35, nausea: -0.9
+};
+
+function spawnGuest() {
+  var rnd = Math.random;
+  var e = world.entrance;
+  var g = {
+    x: e.x, y: e.y, level: tileAt(e.x, e.y).path ? tileAt(e.x, e.y).path.level : tileAt(e.x, e.y).h,
+    route: null, target: null, state: 'walk',
+    happiness: 60 + rnd() * 30,
+    energy: 70 + rnd() * 30, hunger: rnd() * 25, thirst: rnd() * 30,
+    bladder: rnd() * 20, nausea: 0, wetness: 0,
+    money: 12 + rnd() * 40, patience: 40 + rnd() * 60,
+    nauseaTolerance: 25 + rnd() * 55,
+    intensityPreference: 2 + rnd() * 7,
+    ridden: {}, spent: 0,
+    thought: '', thoughtT: 0,
+    shirt: SHIRTS[(rnd() * SHIRTS.length) | 0],
+    skin: SKINS[(rnd() * SKINS.length) | 0],
+    anim: rnd() * 6, frame: 0,
+    visit: 200 + rnd() * 260,
+    waited: 0
+  };
+  guests.push(g);
+  park.cash += park.entryFee;
+  park.admissions++;
+  g.money -= park.entryFee;
+  decide(g);
+  return g;
+}
+
+/* Thought bubbles are rationed park-wide: with a crowd this size a small
+   per-guest chance becomes constant chatter. */
+function think(g, line, urgent) {
+  if (park.thoughtCool > (urgent ? 3 : 0)) return;
+  g.thought = line;
+  g.thoughtT = 3.6;
+  park.thoughtCool = 7 + Math.random() * 7;
+}
+
+/* ── where to go ──────────────────────────────────────────────────────
+   One breadth-first sweep from where the guest stands, stopping at the first
+   thing that serves the need. Called on arrival or when a need crosses a
+   threshold, never per frame. */
+function nearestServing(g, serves) {
+  var start = pathKey(Math.round(g.x), Math.round(g.y));
+  if (!pathGraph.nodes[start]) return null;
+  var seen = {}, prev = {}, q = [start];
+  seen[start] = 1;
+  while (q.length) {
+    var cur = q.shift();
+    var p = cur.split(','), cx = +p[0], cy = +p[1];
+    var here = tileAt(cx, cy);
+    // a bench sits on the path; a shop sits beside it
+    if (here.object && here.object.type === 'facility') {
+      var ft0 = facilityType(here.object.fid);
+      if (ft0 && ft0.serves === serves) return { x: cx, y: cy, tile: here };
+    }
+    for (var d = 0; d < 4; d++) {
+      var nx = cx + DX[d], ny = cy + DY[d];
+      var nb = tileAt(nx, ny);
+      if (nb && nb.object && nb.object.type === 'facility') {
+        var ft = facilityType(nb.object.fid);
+        if (ft && ft.serves === serves && !ft.onPath) return { x: cx, y: cy, tile: nb, doorX: nx, doorY: ny };
+      }
+      var k = nx + ',' + ny;
+      if (seen[k] || !pathGraph.nodes[k]) continue;
+      var a = tileAt(cx, cy), b = tileAt(nx, ny);
+      if (!walkable(a, b)) continue;
+      seen[k] = 1; prev[k] = cur; q.push(k);
+    }
+  }
+  return null;
+}
+
+/* Ride choice is a score, not a rule tree, so a new ride type needs no new
+   code — and this is where a weather system would multiply water rides. */
+function rideScore(g, ride) {
+  if (ride.status !== 'open' || !ride.tested) return -1;
+  if (!doorReachable(ride.entranceTile)) return -1;
+  var r = ride.ratings;
+  if (r.intensity >= 10) return -1;
+  if (r.intensity > g.intensityPreference + 4) return -1;
+  if (ride.ticketPrice > g.money) return -1;
+  if (ride.queue.length >= 24) return -1;
+
+  var fit = 1 - Math.abs(r.intensity - g.intensityPreference) / 8;
+  var novelty = g.ridden[ride.id] ? 0.55 : 1.25;
+  var sickly = Math.max(0, r.nausea - g.nauseaTolerance / 10) * 0.12;
+  var dear = ride.ticketPrice * 0.22;
+  var queued = ride.queue.length * 0.08;
+  var weather = (rideType(ride.typeId).weatherAffinity || 1);
+  return (r.excitement * fit * novelty * weather) - sickly - dear - queued;
+}
+
+function bestRide(g) {
+  var best = null, bestScore = 0.4;
+  for (var i = 0; i < rides.length; i++) {
+    var sc = rideScore(g, rides[i]);
+    if (sc > bestScore) { bestScore = sc; best = rides[i]; }
+  }
+  return best;
+}
+
+function walkTo(g, x, y, target) {
+  var app = approachTile(x, y);
+  if (!app) return false;
+  var r = route(Math.round(g.x), Math.round(g.y), app.x, app.y);
+  if (!r) return false;
+  if (app.x !== x || app.y !== y) r.push({ x: x, y: y, door: true });
+  g.route = r;
+  g.target = target;
+  g.state = 'walk';
+  return true;
+}
+
+function decide(g) {
+  if (g.state === 'queue' || g.state === 'ride') return;
+  var need = null;
+  if (g.bladder > 82) need = 'bladder';
+  else if (g.nausea > 65) need = 'nausea';
+  else if (g.hunger > 78) need = 'hunger';
+  else if (g.thirst > 78) need = 'thirst';
+  else if (g.energy < 18) need = 'energy';
+
+  if (need) {
+    var spot = nearestServing(g, need);
+    if (spot && walkTo(g, spot.x, spot.y, { kind: 'facility', need: need,
+                                            x: spot.doorX === undefined ? spot.x : spot.doorX,
+                                            y: spot.doorY === undefined ? spot.y : spot.doorY })) return;
+    // nothing serves it: complain, and in one case make a mess
+    if (need === 'bladder' && g.bladder > 96) {
+      var here = tileAt(Math.round(g.x), Math.round(g.y));
+      if (here && here.path && !here.object) {
+        here.object = { type: 'mess', kind: 'wet' };
+        g.bladder = 0;
+        g.happiness -= 28;
+        think(g, 'WELL THAT IS MY DIGNITY GONE', true);
+      }
+    } else if (need === 'nausea' && g.nausea > 88) {
+      var t2 = tileAt(Math.round(g.x), Math.round(g.y));
+      if (t2 && t2.path && !t2.object) {
+        t2.object = { type: 'mess', kind: 'sick' };
+        g.nausea = 20;
+        g.happiness -= 18;
+        think(g, 'I SHOULD NOT HAVE HAD THE CHIPS', true);
+      }
+    } else if (Math.random() < 0.4) {
+      think(g, need === 'bladder' ? 'WHERE ARE THE TOILETS?'
+          : need === 'hunger' ? 'I COULD MURDER A BAG OF CHIPS'
+          : need === 'thirst' ? 'I COULD MURDER A CUP OF TEA'
+          : need === 'energy' ? 'MY FEET ARE KILLING ME'
+          : 'I NEED TO SIT DOWN QUIETLY');
+    }
+  }
+
+  if (g.visit <= 0 || g.happiness < 24) {
+    if (walkTo(g, world.entrance.x, world.entrance.y, { kind: 'out' })) { g.state = 'leave'; return; }
+  }
+
+  var ride = bestRide(g);
+  if (ride && walkTo(g, ride.entranceTile.x, ride.entranceTile.y, { kind: 'ride', id: ride.id })) return;
+
+  // nothing doing: wander to a random reachable path tile
+  var keys = Object.keys(pathGraph.nodes);
+  if (!keys.length) return;
+  var pick = keys[(Math.random() * keys.length) | 0].split(',');
+  walkTo(g, +pick[0], +pick[1], { kind: 'wander' });
+}
+
+/* ── the clock ── */
+function stepGuests(dt) {
+  var i, g;
+  if (park.thoughtCool > 0) park.thoughtCool -= dt;
+
+  park.spawnT -= dt;
+  if (park.spawnT <= 0) {
+    var pull = 0.4 + park.rating / 420;
+    park.spawnT = Math.max(0.8, 5 / pull);
+    if (guests.length < GUEST_MAX && park.open) spawnGuest();
+  }
+
+  for (i = guests.length - 1; i >= 0; i--) {
+    g = guests[i];
+    g.visit -= dt;
+    if (g.thoughtT > 0) g.thoughtT -= dt;
+
+    g.hunger = clamp(g.hunger + NEEDS.hunger * dt, 0, 100);
+    g.thirst = clamp(g.thirst + NEEDS.thirst * dt, 0, 100);
+    g.bladder = clamp(g.bladder + NEEDS.bladder * dt, 0, 100);
+    g.nausea = clamp(g.nausea + NEEDS.nausea * dt, 0, 100);
+    if (g.state !== 'sit') g.energy = clamp(g.energy + NEEDS.energy * dt, 0, 100);
+
+    if (g.state === 'ride') continue;
+
+    if (g.state === 'queue') {
+      g.waited += dt;
+      g.happiness -= dt * 0.5;
+      if (g.waited > g.patience) {
+        leaveQueue(g);
+        think(g, 'THIS QUEUE IS A DISGRACE');
+        g.happiness -= 12;
+      }
+      continue;
+    }
+
+    if (g.state === 'sit') {
+      g.energy = clamp(g.energy + 6 * dt, 0, 100);
+      g.waited += dt;
+      if (g.energy > 75 || g.waited > 18) { g.state = 'walk'; g.waited = 0; decide(g); }
+      continue;
+    }
+
+    stepWalk(g, dt);
+    if (g.state === 'gone') { guests.splice(i, 1); continue; }
+  }
+
+  // only a slice re-thinks each frame
+  for (var n = 0; n < AI_SLICE && guests.length; n++) {
+    guestCursor = (guestCursor + 1) % guests.length;
+    var gg = guests[guestCursor];
+    if (gg.state === 'walk' && (!gg.route || !gg.route.length)) decide(gg);
+  }
+
+  if (guests.length) {
+    var sum = 0;
+    for (i = 0; i < guests.length; i++) sum += guests[i].happiness;
+    park.happy = sum / guests.length;
+  }
+  park.guests = guests.length;
+
+  operateRides(dt);
+}
+
+function stepWalk(g, dt) {
+  if (!g.route || !g.route.length) return;
+  var next = g.route[0];
+  var dx = next.x - g.x, dy = next.y - g.y;
+  var dist = Math.hypot(dx, dy);
+  if (dist < 0.06) {
+    g.x = next.x; g.y = next.y;
+    var t = tileAt(g.x, g.y);
+    if (t && t.path) g.level = t.path.level;
+    g.route.shift();
+    if (!g.route.length) arrive(g);
+    return;
+  }
+  var step = Math.min(dist, WALK_SPEED * dt);
+  g.x += dx / dist * step;
+  g.y += dy / dist * step;
+  g.anim += step * 4.5;
+  g.frame = (g.anim | 0) % 2;
+}
+
+function arrive(g) {
+  var tgt = g.target;
+  if (!tgt) { decide(g); return; }
+  if (tgt.kind === 'out') { g.state = 'gone'; return; }
+
+  if (tgt.kind === 'ride') {
+    var ride = rideById(tgt.id);
+    if (!ride || ride.status !== 'open' || rideScore(g, ride) < 0) { g.target = null; decide(g); return; }
+    ride.queue.push(g);
+    g.state = 'queue';
+    g.waited = 0;
+    g.queueOf = ride.id;
+    return;
+  }
+
+  if (tgt.kind === 'facility') {
+    var t = tileAt(tgt.x, tgt.y);
+    if (!t || !t.object || t.object.type !== 'facility') { g.target = null; decide(g); return; }
+    var ft = facilityType(t.object.fid);
+    if (ft.onPath) {
+      if (ft.serves === 'energy') { g.state = 'sit'; g.waited = 0; return; }
+      g.target = null; decide(g); return;
+    }
+    if (t.object.queue.length >= ft.capacity) { g.target = null; decide(g); return; }
+    if (t.object.price > g.money) { think(g, 'HOW MUCH?'); g.target = null; decide(g); return; }
+    t.object.queue.push({ g: g, t: 0 });
+    g.state = 'queue';
+    g.waited = 0;
+    g.usingAt = { x: tgt.x, y: tgt.y };
+    return;
+  }
+  g.target = null;
+  decide(g);
+}
+
+function leaveQueue(g) {
+  if (g.queueOf) {
+    var ride = rideById(g.queueOf);
+    if (ride) {
+      var i = ride.queue.indexOf(g);
+      if (i >= 0) ride.queue.splice(i, 1);
+    }
+    g.queueOf = null;
+  }
+  if (g.usingAt) {
+    var t = tileAt(g.usingAt.x, g.usingAt.y);
+    if (t && t.object && t.object.queue) {
+      for (var j = 0; j < t.object.queue.length; j++) {
+        if (t.object.queue[j].g === g) { t.object.queue.splice(j, 1); break; }
+      }
+    }
+    g.usingAt = null;
+  }
+  g.state = 'walk';
+  g.target = null;
+  g.route = null;
+  g.waited = 0;
+}
+
+/* Shops serve their queue on a timer; rides run a train for real. */
+function serveFacilities(dt) {
+  for (var i = 0; i < world.tiles.length; i++) {
+    var o = world.tiles[i].object;
+    if (!o || o.type !== 'facility' || !o.queue || !o.queue.length) continue;
+    var ft = facilityType(o.fid);
+    for (var j = o.queue.length - 1; j >= 0; j--) {
+      var slot = o.queue[j];
+      slot.t += dt;
+      if (slot.t < 2.5) continue;
+      var g = slot.g;
+      o.queue.splice(j, 1);
+      g.money -= o.price;
+      g.spent += o.price;
+      park.cash += o.price;
+      o.takings += o.price;
+      o.served++;
+      if (ft.serves === 'bladder') g.bladder = 0;
+      else if (ft.serves === 'hunger') { g.hunger = 0; g.happiness += 6; }
+      else if (ft.serves === 'thirst') { g.thirst = 0; g.happiness += 5; }
+      else if (ft.serves === 'nausea') { g.nausea = 0; g.happiness += 4; }
+      if (ft.raises === 'bladder') g.bladder = Math.min(100, g.bladder + 45);
+      g.usingAt = null;
+      g.state = 'walk';
+      g.target = null;
+      g.route = null;
+      if (Math.random() < 0.25) think(g, ft.serves === 'bladder' ? 'THAT IS BETTER'
+                                       : ft.serves === 'hunger' ? 'THAT HIT THE SPOT'
+                                       : 'MUCH OBLIGED');
+    }
+  }
+}
+
+function operateRides(dt) {
+  serveFacilities(dt);
+  for (var i = 0; i < rides.length; i++) {
+    var ride = rides[i];
+    if (ride.dwell > 0) ride.dwell -= dt;
+    if (ride.run) { stepRideRun(ride, dt); continue; }
+    if (ride.status !== 'open' || !ride.tested) continue;
+    if (ride.dwell > 0 || !ride.queue.length) continue;
+
+    var P = ridePhysics(ride);
+    var load = Math.min(ride.queue.length, rideType(ride.typeId).capacity);
+    var riders = ride.queue.splice(0, load);
+    for (var k = 0; k < riders.length; k++) {
+      riders[k].state = 'ride';
+      riders[k].queueOf = null;
+      riders[k].money -= ride.ticketPrice;
+      riders[k].spent += ride.ticketPrice;
+      park.cash += ride.ticketPrice;
+      ride.takings = (ride.takings || 0) + ride.ticketPrice;
+    }
+    ride.run = { path: buildRidePath(ride), s: 0.01, v: P.liftSpeed, t: 0, riders: riders };
+  }
+}
+
+/* An operating train runs on the same integrator as a test lap. */
+function stepRideRun(ride, dt) {
+  var P = ridePhysics(ride), run = ride.run;
+  var set = rideType(ride.typeId).pieceSet;
+  var pts = run.path.pts, L = run.path.len;
+  var sPos = ((run.s % L) + L) % L;
+  var lo = 0, hi = pts.length - 1;
+  while (lo < hi - 1) {
+    var mid = (lo + hi) >> 1;
+    if (pts[mid].s <= sPos) lo = mid; else hi = mid;
+  }
+  var st = pts[lo];
+  var def = PIECE_SETS[set][ride.pieces[run.path.owner[lo]].type];
+
+  var a = -P.gravity * st.t.z - P.friction * run.v - P.drag * run.v * Math.abs(run.v);
+  if (def.brake && run.v > P.brakeSpeed) a -= P.brakeForce;
+  run.v += a * dt;
+  if (def.chain && run.v >= 0 && run.v < P.liftSpeed) run.v = P.liftSpeed;
+  run.s += run.v * dt;
+  run.t += dt;
+
+  if (run.s >= L || run.t > 120) {
+    var riders = run.riders;
+    for (var i = 0; i < riders.length; i++) {
+      var g = riders[i];
+      g.ridden[ride.id] = true;
+      var joy = ride.ratings.excitement * 6 - Math.max(0, ride.ratings.intensity - g.intensityPreference - 2) * 7;
+      g.happiness = clamp(g.happiness + clamp(joy, -32, 22), 0, 100);
+      g.nausea = clamp(g.nausea + ride.ratings.nausea * 2.4, 0, 100);
+      g.state = 'walk';
+      g.route = null; g.target = null;
+      var ex = ride.exitTile || ride.entranceTile;
+      g.x = ex.x; g.y = ex.y;
+      var et = tileAt(ex.x, ex.y);
+      g.level = et && et.path ? et.path.level : (et ? et.h : g.level);
+      if (ride.ratings.intensity > g.intensityPreference + 2) think(g, 'I WANT TO GET OFF ' + ride.name, true);
+      else if (g.nausea > 70) think(g, 'I FEEL A BIT GREEN', true);
+      else if (ride.ratings.excitement > 5 && Math.random() < 0.4) think(g, 'THAT WAS SMASHING');
+      else if (Math.random() < 0.12) think(g, 'THAT WAS ALRIGHT');
+    }
+    ride.run = null;
+    ride.dwell = 3;
+    ride.riders = (ride.riders || 0) + riders.length;
+  }
+}
+
+/* ── drawing ── */
+function drawGuest(g, gg) {
+  var rx = rotX(g.x, g.y), ry = rotY(g.x, g.y);
+  var sx = Math.round((rx - ry) * HW + cam.x + HW);
+  var sy = Math.round((rx + ry) * HH - g.level * ZH + cam.y + HH);
+
+  gg.fillStyle = 'rgba(0,0,0,0.25)';
+  gg.fillRect(sx - 2, sy - 1, 4, 1);
+  gg.fillStyle = g.shirt;
+  gg.fillRect(sx - 1, sy - 5, 3, 3);
+  gg.fillStyle = shadeHex(g.shirt, 0.7);
+  gg.fillRect(sx - 1, sy - 5, 1, 3);
+  gg.fillStyle = '#2f3238';
+  if (g.frame) { gg.fillRect(sx - 1, sy - 2, 1, 2); gg.fillRect(sx + 1, sy - 2, 1, 2); }
+  else { gg.fillRect(sx, sy - 2, 2, 2); }
+  gg.fillStyle = g.skin;
+  gg.fillRect(sx - 1, sy - 8, 3, 3);
+  gg.fillStyle = '#3a2a1c';
+  gg.fillRect(sx - 1, sy - 8, 3, 1);
+  g.sx = sx; g.sy = sy;
+}
+
+function drawThought(g, gg) {
+  var w = textW(g.thought) + 6, h = 12;
+  var x = Math.round(g.sx - w / 2), y = Math.round(g.sy - 22);
+  if (x < 1) x = 1;
+  if (x + w > bufW - 1) x = bufW - 1 - w;
+  gg.fillStyle = '#f4f2ea';
+  gg.fillRect(x, y, w, h);
+  gg.fillRect(g.sx - 1, y + h, 3, 3);
+  gg.fillStyle = '#2b2b2b';
+  gg.fillRect(x, y - 1, w, 1); gg.fillRect(x, y + h, w, 1);
+  gg.fillRect(x - 1, y, 1, h); gg.fillRect(x + w, y, 1, h);
+  text(gg, g.thought, x + 3, y + 3, '#2b2b2b');
+}
+
+var guestMap = {};
+function buildGuestMap() {
+  guestMap = {};
+  for (var i = 0; i < guests.length; i++) {
+    var g = guests[i];
+    if (g.state === 'ride') continue;
+    var k = clamp(Math.round(g.x), 0, WORLD - 1) + ',' + clamp(Math.round(g.y), 0, WORLD - 1);
+    (guestMap[k] || (guestMap[k] = [])).push(g);
+  }
+}
+
 /* ═══════════════════════════ park ═══════════════════════════ */
 
 var park = {
@@ -2046,6 +2577,11 @@ var park = {
   entryFee: 5,
   rating: 500,
   guests: 0,
+  happy: 60,
+  admissions: 0,
+  open: true,
+  spawnT: 2,
+  thoughtCool: 4,
   day: 1, month: 0, year: 1,
   clock: 0
 };
@@ -2655,6 +3191,9 @@ function drawObject(g, obj, sx, sy) {
     case 'entrance': img = SPR.deco.entrance; break;
     case 'rideEntrance': img = SPR.deco.rideIn; break;
     case 'rideExit': img = SPR.deco.rideOut; break;
+    case 'mess':
+      img = obj.kind === 'sick' ? SPR.deco.sick : SPR.deco.wet;
+      break;
     case 'facility':
       if (obj.fid === 'bench') img = SPR.deco.bench;
       else if (obj.fid === 'bin') img = SPR.deco.bin;
@@ -2750,6 +3289,9 @@ function drawWorld(g) {
 
       var tk = trackMap[w.x + ',' + w.y];
       if (tk) for (var ti = 0; ti < tk.length; ti++) drawPiece(g, tk[ti].set, tk[ti].p);
+
+      var folk = guestMap[w.x + ',' + w.y];
+      if (folk) for (var fi2 = 0; fi2 < folk.length; fi2++) drawGuest(folk[fi2], g);
 
       var cars = carMap[w.x + ',' + w.y];
       if (cars) for (var ci = 0; ci < cars.length; ci++) drawCar(g, sim.ride, cars[ci].st, cars[ci].i);
@@ -2891,6 +3433,14 @@ function winAt(ux, uy) {
     if (ux >= w.x && ux <= w.x + w.w && uy >= w.y && uy <= w.y + w.h) return w;
   }
   return null;
+}
+
+function drawThoughts(g) {
+  var shown = 0;
+  for (var n = 0; n < guests.length && shown < 2; n++) {
+    var gu = guests[n];
+    if (gu.thoughtT > 0 && gu.state !== 'ride' && gu.sx !== undefined) { drawThought(gu, g); shown++; }
+  }
 }
 
 function neighbourR(rx, ry) {                 // neighbour in rotated space
@@ -3442,7 +3992,9 @@ function render() {
   bctx.fillRect(0, 0, bufW, bufH);
   buildTrackMap();
   buildCarMap();
+  buildGuestMap();
   drawWorld(bctx);
+  drawThoughts(bctx);
   drawStrokeGhost(bctx);
   drawTrackGhost(bctx);
 
@@ -3910,6 +4462,7 @@ function update(dt) {
 
   // two substeps: the curvature through a loop is tight enough to want them
   if (sim.active) { stepSim(dt / 2); stepSim(dt / 2); }
+  stepGuests(dt);
   if (sim.active && sim.follow && sim.path && sim.ride) {
     var st = sampleAt(sim.s), pos = projectWorld(sim.ride, st.x, st.y, st.z);
     cam.x += (bufW / 2 - pos.sx) * 0.12;
