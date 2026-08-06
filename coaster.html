@@ -1650,6 +1650,7 @@ function canOpen(ride) {
   if (!ride.entranceTile) return 'IT NEEDS A WAY IN';
   if (!ride.exitTile) return 'IT NEEDS A WAY OUT';
   if (!ride.tested) return 'IT HAS NOT BEEN TESTED';
+  if (ride.stalled) return 'IT STALLED IN SERVICE: TEST IT AGAIN';
   if (!doorReachable(ride.entranceTile)) return 'THE WAY IN IS NOT CONNECTED TO THE PARK ENTRANCE';
   if (!doorReachable(ride.exitTile)) return 'THE WAY OUT IS NOT CONNECTED TO THE PARK ENTRANCE';
   return null;
@@ -1960,6 +1961,7 @@ function computeRatings(ride) {
   ride.stats = s;
   ride.geom = g;
   ride.tested = true;
+  ride.stalled = false;               // a completed lap clears a past stall
   if (ride.status !== 'open') ride.status = 'closed';
 }
 
@@ -2556,7 +2558,14 @@ function operateRides(dt) {
   for (var i = 0; i < rides.length; i++) {
     var ride = rides[i];
     if (ride.dwell > 0) ride.dwell -= dt;
-    if (ride.run) { stepRideRun(ride, dt); continue; }
+    // the same two substeps the test lap uses: at one full step the integrator
+    // loses enough speed on a climb that a ride can pass its test and then
+    // stall in service, which is indistinguishable from a broken ride
+    if (ride.run) {
+      stepRideRun(ride, dt / 2);
+      if (ride.run) stepRideRun(ride, dt / 2);
+      continue;
+    }
     if (ride.status !== 'open' || !ride.tested) continue;
     if (ride.dwell > 0 || !ride.queue.length) continue;
 
@@ -2573,6 +2582,33 @@ function operateRides(dt) {
       ride.takings = (ride.takings || 0) + ride.ticketPrice;
     }
     ride.run = { path: buildRidePath(ride), s: 0.01, v: P.liftSpeed, t: 0, riders: riders };
+  }
+}
+
+/* Riders leave by the way out whether the lap finished or the train gave up
+   part way round — being stuck on it is a different memory from riding it. */
+function unloadRiders(ride, riders, stalled) {
+  for (var i = 0; i < riders.length; i++) {
+    var g = riders[i];
+    g.ridden[ride.id] = true;
+    g.state = 'walk';
+    g.route = null; g.target = null;
+    var ex = ride.exitTile || ride.entranceTile;
+    g.x = ex.x; g.y = ex.y;
+    var et = tileAt(ex.x, ex.y);
+    g.level = et && et.path ? et.path.level : (et ? et.h : g.level);
+    if (stalled) {
+      g.happiness = clamp(g.happiness - 30, 0, 100);
+      think(g, 'I WAS STUCK ON ' + ride.name, true);
+      continue;
+    }
+    var joy = ride.ratings.excitement * 6 - Math.max(0, ride.ratings.intensity - g.intensityPreference - 2) * 7;
+    g.happiness = clamp(g.happiness + clamp(joy, -32, 22), 0, 100);
+    g.nausea = clamp(g.nausea + ride.ratings.nausea * 2.4, 0, 100);
+    if (ride.ratings.intensity > g.intensityPreference + 2) think(g, 'I WANT TO GET OFF ' + ride.name, true);
+    else if (g.nausea > 70) think(g, 'I FEEL A BIT GREEN', true);
+    else if (ride.ratings.excitement > 5 && Math.random() < 0.4) think(g, 'THAT WAS SMASHING');
+    else if (Math.random() < 0.12) think(g, 'THAT WAS ALRIGHT');
   }
 }
 
@@ -2597,28 +2633,30 @@ function stepRideRun(ride, dt) {
   run.s += run.v * dt;
   run.t += dt;
 
-  if (run.s >= L || run.t > 120) {
-    var riders = run.riders;
-    for (var i = 0; i < riders.length; i++) {
-      var g = riders[i];
-      g.ridden[ride.id] = true;
-      var joy = ride.ratings.excitement * 6 - Math.max(0, ride.ratings.intensity - g.intensityPreference - 2) * 7;
-      g.happiness = clamp(g.happiness + clamp(joy, -32, 22), 0, 100);
-      g.nausea = clamp(g.nausea + ride.ratings.nausea * 2.4, 0, 100);
-      g.state = 'walk';
-      g.route = null; g.target = null;
-      var ex = ride.exitTile || ride.entranceTile;
-      g.x = ex.x; g.y = ex.y;
-      var et = tileAt(ex.x, ex.y);
-      g.level = et && et.path ? et.path.level : (et ? et.h : g.level);
-      if (ride.ratings.intensity > g.intensityPreference + 2) think(g, 'I WANT TO GET OFF ' + ride.name, true);
-      else if (g.nausea > 70) think(g, 'I FEEL A BIT GREEN', true);
-      else if (ride.ratings.excitement > 5 && Math.random() < 0.4) think(g, 'THAT WAS SMASHING');
-      else if (Math.random() < 0.12) think(g, 'THAT WAS ALRIGHT');
-    }
+  /* The same test the test lap applies. Without it a train that cannot climb
+     shuffles about until the 120s cap while the station stands blocked, which
+     reads as "nobody can ride" rather than "this hill is too steep". */
+  if (run.v < P.rollbackSpeed) run.rollT = (run.rollT || 0) + dt * P.rollbackRate;
+  else if (!def.chain && run.v < P.stallSpeed) run.rollT = (run.rollT || 0) + dt;
+  else run.rollT = 0;
+  if (run.rollT > P.stallAfter) {
+    unloadRiders(ride, run.riders, true);
     ride.run = null;
     ride.dwell = 3;
-    ride.riders = (ride.riders || 0) + riders.length;
+    ride.stalled = true;
+    ride.status = 'closed';
+    sfxBad();
+    toast(ride.name + ' HAS STALLED');
+    layoutUI();
+    return;
+  }
+
+  if (run.s >= L || run.t > 120) {
+    var carried = run.riders.length;
+    unloadRiders(ride, run.riders, false);
+    ride.run = null;
+    ride.dwell = 3;
+    ride.riders = (ride.riders || 0) + carried;
   }
 }
 
@@ -4601,7 +4639,7 @@ function serialiseRides() {
       station: r.station, cursor: r.cursor, complete: r.complete,
       entranceTile: r.entranceTile, exitTile: r.exitTile,
       status: r.status, ratings: r.ratings, ticketPrice: r.ticketPrice,
-      tested: !!r.tested, spent: r.spent || 0
+      tested: !!r.tested, stalled: !!r.stalled, spent: r.spent || 0
     });
   }
   return out;
@@ -4617,7 +4655,7 @@ function restoreRides(saved) {
       status: d.status || 'closed',
       ratings: d.ratings || { excitement: 0, intensity: 0, nausea: 0 },
       ticketPrice: d.ticketPrice === undefined ? 2 : d.ticketPrice,
-      tested: !!d.tested, spent: d.spent || 0,
+      tested: !!d.tested, stalled: !!d.stalled, spent: d.spent || 0,
       queue: [], vehicles: [], stats: {}
     };
     rides.push(r);
