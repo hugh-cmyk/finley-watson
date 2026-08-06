@@ -115,10 +115,7 @@ var MAX_BUF_PX   = 3700000;      // buffer area guard; big enough for the map vi
 var STEP    = 1 / 60;  // fixed simulation step
 var MAX_DT  = 0.1;     // clamp so a backgrounded tab doesn't fast-forward
 
-/* DEV MONEY: a fat float so building is never the bottleneck while testing.
-   Both of the lines tagged DEV MONEY come out before this ships — the design
-   starts you on £10,000 and the squeeze is the point. */
-var START_CASH = 100000;                        // DEV MONEY (ships as 10000)
+var START_CASH = 10000;                         // what you start a park with
 
 var SAVE_KEY = 'finley-coaster-park', BEST_KEY = 'finley-coaster-best';
 var ARCHIVE_KEY = 'finley-coaster-park-v1-archive';
@@ -4784,8 +4781,6 @@ buildSprites();
 loadBest();
 generateWorld(20260806);
 if (!loadGame()) { park.owned = ownedCount(); rebuildPathGraph(); }
-if (park.cash < START_CASH) park.cash = START_CASH;   // DEV MONEY (delete before shipping)
-
 resize();
 centreOn(world.entrance.x, world.entrance.y - 6);
 layoutUI();
