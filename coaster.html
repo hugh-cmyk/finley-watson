@@ -825,6 +825,7 @@ function buildSprites() {
   SPR.deco.bench = makeBenchSpr();
   SPR.deco.sick = makeMess('#7f8f3a');
   SPR.deco.wet = makeMess('#8fa0b8');
+  SPR.deco.litter = makeMess('#d8d2c0');
   SPR.deco.bin = makeBinSpr();
   SPR.hut = {};
   for (var fi = 0; fi < FACILITY_TYPES.length; fi++) {
@@ -1272,6 +1273,8 @@ function commitStroke() {
     n++;
   }
   park.cash -= spent;
+  if (build.tool.kind === 'land') park.books.land += spent;
+  else park.books.building += spent;
   if (build.tool.kind === 'facility') {
     toast(build.tool.facility.name + ' - ' + money(spent));
   } else if (build.tool.kind === 'land') {
@@ -1585,6 +1588,7 @@ function placeRidePiece(ride, id) {
   var c = ride.cursor, def = pieceDef(ride, id);
   addPiece(ride, id, c.x, c.y, c.z, c.d);
   park.cash -= def.cost;
+  park.books.building += def.cost;
   ride.spent = (ride.spent || 0) + def.cost;
   var closed = closesCircuit(ride, id);
   ride.cursor = pieceExit(def, c.x, c.y, c.z, c.d);
@@ -1732,6 +1736,7 @@ function createRide(typeId, x, y, d) {
   addPiece(ride, 'station', x, y, plan.z, d);
   ride.cursor = pieceExit(pieceDef(ride, 'station'), x, y, plan.z, d);
   park.cash -= plan.cost;
+  park.books.building += plan.cost;
   toast(ride.name + ' STARTED');
   return ride;
 }
@@ -2130,6 +2135,7 @@ function spawnGuest() {
   };
   guests.push(g);
   park.cash += park.entryFee;
+  park.books.admissions += park.entryFee;
   park.admissions++;
   g.money -= park.entryFee;
   decide(g);
@@ -2270,7 +2276,7 @@ function decide(g) {
 
   // nothing doing: wander to a random reachable path tile
   var keys = Object.keys(pathGraph.nodes);
-  if (!keys.length) return;
+  if (!keys.length) { g.lost = true; return; }
   var pick = keys[(Math.random() * keys.length) | 0].split(',');
   walkTo(g, +pick[0], +pick[1], { kind: 'wander' });
 }
@@ -2319,6 +2325,7 @@ function stepGuests(dt) {
     }
 
     stepWalk(g, dt);
+    maybeLitter(g);
     if (g.state === 'gone') { guests.splice(i, 1); continue; }
   }
 
@@ -2336,7 +2343,18 @@ function stepGuests(dt) {
   }
   park.guests = guests.length;
 
+  park.ratingT -= dt;
+  if (park.ratingT <= 0) { park.ratingT = 3; park.lost = countLost(); computeParkRating(); }
+
   operateRides(dt);
+}
+
+function countLost() {
+  var n = 0;
+  for (var i = 0; i < guests.length; i++) {
+    if (guests[i].lost || (guests[i].state === 'walk' && !guests[i].route)) n++;
+  }
+  return n;
 }
 
 function stepWalk(g, dt) {
@@ -2418,6 +2436,51 @@ function leaveQueue(g) {
   g.waited = 0;
 }
 
+/* Guests drop litter on paths with no bin in reach. A bin two tiles away is
+   the difference between a tidy park and a rating that will not climb. */
+function maybeLitter(g) {
+  if (Math.random() > 0.004) return;
+  var x = Math.round(g.x), y = Math.round(g.y);
+  var here = tileAt(x, y);
+  if (!here || !here.path || here.object) return;
+  for (var dx = -2; dx <= 2; dx++) {
+    for (var dy = -2; dy <= 2; dy++) {
+      var nb = tileAt(x + dx, y + dy);
+      if (nb && nb.object && nb.object.type === 'facility' && nb.object.fid === 'bin') return;
+    }
+  }
+  here.object = { type: 'mess', kind: 'litter' };
+}
+
+/* Park rating, nought to nine hundred and ninety nine. Recomputed every few
+   seconds rather than every frame, and it drives who turns up at the gate. */
+function countMess() {
+  var n = 0;
+  for (var i = 0; i < world.tiles.length; i++) {
+    var o = world.tiles[i].object;
+    if (o && o.type === 'mess') n++;
+  }
+  return n;
+}
+function computeParkRating() {
+  var openRides = 0, kinds = {}, i;
+  for (i = 0; i < rides.length; i++) {
+    if (rides[i].status === 'open') openRides++;
+    kinds[rides[i].typeId] = 1;
+  }
+  var variety = Object.keys(kinds).length;
+  var mess = countMess();
+
+  var r = 380;
+  r += (park.happy - 50) * 5.2;                 // what the crowd thinks
+  r += Math.min(openRides, 8) * 26;             // something to do
+  r += variety * 16;                            // and some choice about it
+  r -= Math.min(mess, 40) * 7;                  // litter and worse
+  r -= Math.min(park.lost, 30) * 5;             // people who cannot get anywhere
+  if (!openRides) r -= 120;
+  park.rating = Math.round(clamp(r, 0, 999));
+}
+
 /* Shops serve their queue on a timer; rides run a train for real. */
 function serveFacilities(dt) {
   for (var i = 0; i < world.tiles.length; i++) {
@@ -2433,6 +2496,7 @@ function serveFacilities(dt) {
       g.money -= o.price;
       g.spent += o.price;
       park.cash += o.price;
+      park.books.shops += o.price;
       o.takings += o.price;
       o.served++;
       if (ft.serves === 'bladder') g.bladder = 0;
@@ -2469,6 +2533,7 @@ function operateRides(dt) {
       riders[k].money -= ride.ticketPrice;
       riders[k].spent += ride.ticketPrice;
       park.cash += ride.ticketPrice;
+      park.books.tickets += ride.ticketPrice;
       ride.takings = (ride.takings || 0) + ride.ticketPrice;
     }
     ride.run = { path: buildRidePath(ride), s: 0.01, v: P.liftSpeed, t: 0, riders: riders };
@@ -2582,6 +2647,9 @@ var park = {
   open: true,
   spawnT: 2,
   thoughtCool: 4,
+  ratingT: 0,
+  lost: 0,
+  books: { admissions: 0, tickets: 0, shops: 0, land: 0, building: 0 },
   day: 1, month: 0, year: 1,
   clock: 0
 };
@@ -2996,6 +3064,13 @@ function layoutUI() {
     closeWinQuiet('test');
   }
 
+  var pw = findWin('park');
+  if (pw) {
+    buttons.push({ id: 'fee_dn', parkAct: 'fee_dn', x: pw.x + 112, y: pw.y + 71, w: 16, h: 14, label: '-' });
+    buttons.push({ id: 'fee_up', parkAct: 'fee_up', x: pw.x + 132, y: pw.y + 71, w: 16, h: 14, label: '+' });
+    buttons.push({ id: 'books', parkAct: 'books', x: pw.x + 6, y: pw.y + pw.h - 20, w: 60, h: 16, label: 'BOOKS' });
+  }
+
   var fw = findWin('fac');
   if (fw) {
     var ftile = tileAt(fw.fx, fw.fy);
@@ -3043,6 +3118,13 @@ function layoutUI() {
 }
 
 function facilityAction(act) {
+  var pw = findWin('park');
+  if (pw) {
+    buttons.push({ id: 'fee_dn', parkAct: 'fee_dn', x: pw.x + 112, y: pw.y + 71, w: 16, h: 14, label: '-' });
+    buttons.push({ id: 'fee_up', parkAct: 'fee_up', x: pw.x + 132, y: pw.y + 71, w: 16, h: 14, label: '+' });
+    buttons.push({ id: 'books', parkAct: 'books', x: pw.x + 6, y: pw.y + pw.h - 20, w: 60, h: 16, label: 'BOOKS' });
+  }
+
   var fw = findWin('fac');
   if (!fw) return;
   var t = tileAt(fw.fx, fw.fy);
@@ -3100,6 +3182,13 @@ function pressButton(b) {
   if (b.win) { closeWin(b.win); return; }
   if (b.rideAct) { rideAction(b.rideAct, rideById(b.rideRef)); return; }
   if (b.facAct) { facilityAction(b.facAct); return; }
+  if (b.parkAct) {
+    if (b.parkAct === 'fee_up') park.entryFee = Math.min(50, park.entryFee + 1);
+    else if (b.parkAct === 'fee_dn') park.entryFee = Math.max(0, park.entryFee - 1);
+    else if (b.parkAct === 'books') toggleWin('books', openBooksWin);
+    layoutUI();
+    return;
+  }
   if (b.cat) {                              // a category opens or closes its row
     build.cat = build.cat === b.cat ? null : b.cat;
     if (!build.cat) disarm(); else layoutUI();
@@ -3192,7 +3281,8 @@ function drawObject(g, obj, sx, sy) {
     case 'rideEntrance': img = SPR.deco.rideIn; break;
     case 'rideExit': img = SPR.deco.rideOut; break;
     case 'mess':
-      img = obj.kind === 'sick' ? SPR.deco.sick : SPR.deco.wet;
+      img = obj.kind === 'sick' ? SPR.deco.sick
+          : obj.kind === 'litter' ? SPR.deco.litter : SPR.deco.wet;
       break;
     case 'facility':
       if (obj.fid === 'bench') img = SPR.deco.bench;
@@ -3819,14 +3909,41 @@ function facilityReachable(x, y) {
   return false;
 }
 
+function openBooksWin() {
+  openWin({
+    id: 'books', title: 'THE BOOKS', w: 176, h: 13 + 78,
+    draw: function (g, win) {
+      var b = park.books;
+      var inTotal = b.admissions + b.tickets + b.shops;
+      var outTotal = b.land + b.building;
+      var rows = [
+        ['ADMISSIONS', money(b.admissions), '#12401c'],
+        ['RIDE TICKETS', money(b.tickets), '#12401c'],
+        ['SHOPS', money(b.shops), '#12401c'],
+        ['LAND', money(-b.land), '#7a1f18'],
+        ['BUILDING', money(-b.building), '#7a1f18'],
+        ['', '', ''],
+        ['IN HAND', money(park.cash), inTotal >= outTotal ? PAL.uiText : '#7a1f18']
+      ];
+      for (var i = 0; i < rows.length; i++) {
+        var y = win.y + 17 + i * 10;
+        if (!rows[i][0]) { g.fillStyle = PAL.uiLo; g.fillRect(win.x + 6, y + 2, win.w - 12, 1); continue; }
+        text(g, rows[i][0], win.x + 6, y, PAL.uiDim);
+        textRight(g, rows[i][1], win.x + win.w - 6, y, rows[i][2]);
+      }
+    }
+  });
+}
+
 function openParkWin() {
   openWin({
-    id: 'park', title: 'THE PARK', w: 168, h: 13 + 62,
+    id: 'park', title: 'THE PARK', w: 168, h: 13 + 76,
     draw: function (g, win) {
       var rows = [
         ['CASH', money(park.cash)],
         ['LAND', park.owned + ' TILES'],
         ['GUESTS', String(park.guests)],
+        ['HAPPY', Math.round(park.happy) + '%'],
         ['RATING', park.rating + ' OF 999'],
         ['ENTRY', money(park.entryFee)],
         ['DATE', MONTHS[park.month] + ' YEAR ' + park.year]
@@ -4280,7 +4397,8 @@ function serialise() {
     h: h, water: w, owned: own, sale: sale, surf: surf, objects: objs, paths: paths,
     entrance: world.entrance,
     park: { cash: park.cash, day: park.day, month: park.month, year: park.year,
-            rating: park.rating, entryFee: park.entryFee },
+            rating: park.rating, entryFee: park.entryFee,
+            admissions: park.admissions, books: park.books },
     rides: serialiseRides(), nextRideId: nextRideId
   };
 }
@@ -4377,6 +4495,8 @@ function applySave(save) {
   park.cash = save.park.cash;
   park.day = save.park.day; park.month = save.park.month; park.year = save.park.year;
   park.rating = save.park.rating; park.entryFee = save.park.entryFee;
+  park.admissions = save.park.admissions || 0;
+  if (save.park.books) park.books = save.park.books;
   nextRideId = save.nextRideId || 1;
   restoreRides(save.rides);
   park.owned = ownedCount();
