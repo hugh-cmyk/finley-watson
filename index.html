@@ -199,7 +199,7 @@
             background: radial-gradient(circle at 35% 30%, #fff, #b9a7d8 60%, #5b4a86);
             box-shadow: 0 0 8px rgba(220, 200, 255, 0.7);
         }
-        @keyframes moonspin { to { transform: rotate(360deg); } }
+        @keyframes moonspin { to { transform: rotate(-360deg); } }
 
         .emoji {
             position: absolute;
@@ -407,7 +407,7 @@
                 if (inArm) {
                     var arm = Math.floor(Math.random() * arms);
                     var spread = (Math.random() - 0.5) * (0.9 - 0.5 * rFrac);
-                    base = arm * (Math.PI * 2 / arms) + rFrac * WIND + spread;
+                    base = arm * (Math.PI * 2 / arms) - rFrac * WIND + spread;
                 } else {
                     base = Math.random() * Math.PI * 2;             // halo star
                 }
@@ -469,7 +469,7 @@
             var R = orbitRadii();
             for (var i = 0; i < GAMES.length; i++) {
                 var g = GAMES[i];
-                if (!reduce && !g.paused) g.angle += g.speed * 0.16 * dt;
+                if (!reduce && !g.paused) g.angle -= g.speed * 0.16 * dt;
 
                 var x = cx + R.rx * g.r * Math.cos(g.angle);
                 var y = cy + R.ry * g.r * Math.sin(g.angle);
@@ -506,7 +506,7 @@
             // rotating spiral disk
             for (var i = 0; i < spiral.length; i++) {
                 var s = spiral[i];
-                if (!reduce) s.a += s.omega * dt;
+                if (!reduce) s.a -= s.omega * dt;
                 var pr = s.r * maxR;
                 var x = cx + pr * Math.cos(s.a);
                 var y = cy + pr * TILT * Math.sin(s.a);
