@@ -1206,15 +1206,21 @@ var RIDE_TYPES = [
     pieceSet: 'coaster',
     physics: {
       gravity: 9.81, friction: 0.022, drag: 0.0016,
-      liftSpeed: 3.4, brakeSpeed: 4.5, stallSpeed: 0.2,
-      cars: 4, carGap: 2.6, tileMetres: 3, levelMetres: 1.5
+      liftSpeed: 3.4, brakeSpeed: 4.5, brakeForce: 7, stallSpeed: 0.2,
+      rollbackSpeed: -0.3, rollbackRate: 2.5, stallAfter: 0.8,
+      cars: 4, carGap: 2.6, tileMetres: 3, levelMetres: 1.5,
+      frameWindow: 0.9, curveWindow: 1.5, sampleStep: 14,
+      airtimeUnder: 0.2, dropMin: 1.2
     },
     ratingWeights: {
       excitement: { base: 0.5, drops: 0.22, biggestDrop: 0.10, topSpeed: 0.055,
                     airtime: 0.9, inversions: 0.9, variety: 0.18, length: 0.005 },
       intensity:  { vertG: 0.55, latG: 0.55, topSpeed: 0.045,
                     inversions: 0.6, drops: 0.15, capG: 7 },
-      nausea:     { latG: 0.6, turns: 0.22, inversions: 1.1, hardG: 0.5, hardGFrom: 3.5 }
+      nausea:     { latG: 0.6, turns: 0.22, inversions: 1.1, hardG: 0.5, hardGFrom: 3.5 },
+      penalties:  { shortUnder: 30, shortMul: 0.7,
+                    intenseOver: 10, intenseMul: 0.35,
+                    sicklyOver: 6, sicklyMul: 0.85 }
     }
   }
 ];
@@ -1518,6 +1524,327 @@ function doorPlan(ride, x, y) {
   for (var i = 0; i < sides.length; i++) if (sides[i].x === x && sides[i].y === y) next = true;
   if (!next) return { ok: false, why: 'IT MUST TOUCH THE STATION' };
   return { ok: true, cost: 0 };
+}
+
+/* ═══════════════════════════ running a ride ═══════════════════════════
+   Ported from the shipped game. The chain of pieces is flattened into one
+   arc-length parametrised polyline, each sample carrying a tangent and a
+   parallel-transported up/right frame — that frame is what makes G-forces
+   come out right through an inversion, where "up is world up" falls apart.
+
+   The one real change: every number the integrator or the ratings need is
+   read from the ride type, so a flume is a table entry rather than a branch. */
+
+var MPH = 2.23694;
+
+var sim = {
+  active: false, ride: null, mode: 'test', state: 'idle',
+  s: 0, v: 0, t: 0, path: null, stats: null, geom: null,
+  rollT: 0, follow: true, why: ''
+};
+
+function v3sub(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
+function v3len(a) { return Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z); }
+function v3norm(a) { var l = v3len(a) || 1; return { x: a.x / l, y: a.y / l, z: a.z / l }; }
+function v3dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+function v3mul(v, s) { return { x: v.x * s, y: v.y * s, z: v.z * s }; }
+function v3cross(a, b) {
+  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
+}
+
+function ridePhysics(ride) { return rideType(ride.typeId).physics; }
+
+function buildRidePath(ride) {
+  var P = ridePhysics(ride);
+  var set = rideType(ride.typeId).pieceSet;
+  var pts = [], owner = [], i, k;
+
+  for (i = 0; i < ride.pieces.length; i++) {
+    var p = ride.pieces[i], def = PIECE_SETS[set][p.type], f = pathFn(def);
+    var right = (p.d + 1) % 4;
+    var M = Math.max(10, Math.round(P.sampleStep * def.tiles));
+    for (k = (i === 0 ? 0 : 1); k <= M; k++) {
+      var q = f(k / M);
+      pts.push({
+        x: (p.x + q.u * DX[p.d] + q.v * DX[right]) * P.tileMetres,
+        y: (p.y + q.u * DY[p.d] + q.v * DY[right]) * P.tileMetres,
+        z: (p.z + q.w) * P.levelMetres
+      });
+      owner.push(i);
+    }
+  }
+
+  pts[0].s = 0;
+  for (i = 1; i < pts.length; i++) pts[i].s = pts[i - 1].s + v3len(v3sub(pts[i], pts[i - 1]));
+  var len = pts[pts.length - 1].s;
+
+  // Tangents and curvature over a window about as long as the train. Pieces
+  // meet at slight kinks and a point sample there reads as infinite curvature.
+  var HT = P.frameWindow, HK = P.curveWindow;
+  function idxAt(i2, dist) {
+    var target = pts[i2].s + dist, j = i2;
+    if (dist > 0) while (j < pts.length - 1 && pts[j].s < target) j++;
+    else          while (j > 0 && pts[j].s > target) j--;
+    return j;
+  }
+  for (i = 0; i < pts.length; i++) {
+    pts[i].t = v3norm(v3sub(pts[idxAt(i, HT)], pts[idxAt(i, -HT)]));
+  }
+
+  var up = { x: 0, y: 0, z: 1 };
+  up = v3norm(v3sub(up, v3mul(pts[0].t, v3dot(up, pts[0].t))));
+  if (!isFinite(up.x) || v3len(up) < 0.1) up = { x: 0, y: 0, z: 1 };
+  for (i = 0; i < pts.length; i++) {
+    var T = pts[i].t;
+    var u = v3sub(up, v3mul(T, v3dot(up, T)));
+    if (v3len(u) < 1e-4) u = { x: 0, y: 0, z: 1 };
+    u = v3norm(u);
+    pts[i].u = u;
+    pts[i].r = v3norm(v3cross(T, u));
+    up = u;
+  }
+
+  for (i = 0; i < pts.length; i++) {
+    var ia = idxAt(i, -HK), ib = idxAt(i, HK);
+    var ds = pts[ib].s - pts[ia].s;
+    pts[i].k = ds > 1e-6
+      ? { x: (pts[ib].t.x - pts[ia].t.x) / ds, y: (pts[ib].t.y - pts[ia].t.y) / ds,
+          z: (pts[ib].t.z - pts[ia].t.z) / ds }
+      : { x: 0, y: 0, z: 0 };
+  }
+
+  return { pts: pts, owner: owner, len: len, geom: pathGeometry(ride, pts) };
+}
+
+/* Shape facts that do not depend on how the train runs. */
+function pathGeometry(ride, pts) {
+  var P = ridePhysics(ride), set = rideType(ride.typeId).pieceSet;
+  var hi = -1e9, lo = 1e9, drops = [], run = 0, i;
+  for (i = 0; i < pts.length; i++) {
+    hi = Math.max(hi, pts[i].z);
+    lo = Math.min(lo, pts[i].z);
+    if (i > 0) {
+      var dz = pts[i].z - pts[i - 1].z;
+      if (dz < -0.001) run += -dz;
+      else if (run > 0) { if (run >= P.dropMin) drops.push(run); run = 0; }
+    }
+  }
+  if (run >= P.dropMin) drops.push(run);
+  var biggest = 0;
+  for (i = 0; i < drops.length; i++) biggest = Math.max(biggest, drops[i]);
+  var inversions = 0, turns = 0, kinds = {};
+  for (i = 0; i < ride.pieces.length; i++) {
+    var def = PIECE_SETS[set][ride.pieces[i].type];
+    if (def.inversion) inversions++;
+    if (def.turn) turns++;
+    kinds[ride.pieces[i].type] = 1;
+  }
+  return {
+    height: hi - lo, top: hi, drops: drops, biggest: biggest,
+    inversions: inversions, turns: turns, variety: Object.keys(kinds).length,
+    length: pts[pts.length - 1].s
+  };
+}
+
+function band(v) {
+  if (v < 1) return 'VERY LOW';
+  if (v < 2) return 'LOW';
+  if (v < 4) return 'MEDIUM';
+  if (v < 6) return 'HIGH';
+  if (v < 8) return 'VERY HIGH';
+  if (v < 10) return 'EXTREME';
+  return 'ULTRA EXTREME';
+}
+function rateText(v) { return v.toFixed(2) + ' (' + band(v) + ')'; }
+
+/* Three numbers, every weight read from the ride type. Every curve here has a
+   one-tile radius, so even a sedate coaster pulls several lateral G; the scale
+   is calibrated against what this game can actually build. */
+function computeRatings(ride) {
+  var W = rideType(ride.typeId).ratingWeights;
+  var g = sim.geom, s = sim.stats, mph = s.top * MPH;
+  var ex = W.excitement, it = W.intensity, na = W.nausea, pen = W.penalties;
+
+  var vG = Math.min(s.maxG, it.capG), lG = Math.min(s.maxLat, it.capG);
+
+  var excitement = ex.base
+    + g.drops.length * ex.drops
+    + g.biggest * ex.biggestDrop
+    + mph * ex.topSpeed
+    + s.air * ex.airtime
+    + g.inversions * ex.inversions
+    + g.variety * ex.variety
+    + g.length * ex.length;
+
+  var intensity = vG * it.vertG + lG * it.latG + mph * it.topSpeed
+    + g.inversions * it.inversions + g.drops.length * it.drops;
+
+  var nausea = lG * na.latG + g.turns * na.turns + g.inversions * na.inversions
+    + Math.max(0, s.maxG - na.hardGFrom) * na.hardG;
+
+  if (g.length < pen.shortUnder) excitement *= pen.shortMul;
+  if (intensity > pen.intenseOver) excitement *= pen.intenseMul;
+  if (nausea > pen.sicklyOver) excitement *= pen.sicklyMul;
+
+  ride.ratings = {
+    excitement: Math.max(0, excitement),
+    intensity: Math.max(0, intensity),
+    nausea: Math.max(0, nausea)
+  };
+  ride.stats = s;
+  ride.geom = g;
+  ride.tested = true;
+  ride.status = 'closed';
+}
+
+function sampleAt(s) {
+  var P = sim.path, L = P.len, pts = P.pts;
+  s = ((s % L) + L) % L;
+  var lo = 0, hi = pts.length - 1;
+  while (lo < hi - 1) {
+    var mid = (lo + hi) >> 1;
+    if (pts[mid].s <= s) lo = mid; else hi = mid;
+  }
+  var a = pts[lo], b = pts[Math.min(lo + 1, pts.length - 1)];
+  var span = (b.s - a.s) || 1, f = clamp((s - a.s) / span, 0, 1);
+  return {
+    x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, z: a.z + (b.z - a.z) * f,
+    t: a.t, u: a.u, r: a.r, k: a.k, owner: P.owner[lo]
+  };
+}
+
+function startRun(ride, mode) {
+  if (!ride.complete) { toast('CLOSE THE CIRCUIT FIRST'); return; }
+  var P = ridePhysics(ride);
+  sim.ride = ride;
+  sim.mode = mode || 'test';
+  sim.path = buildRidePath(ride);
+  sim.geom = sim.path.geom;
+  sim.active = true;
+  sim.state = 'running';
+  sim.s = 0.01; sim.v = P.liftSpeed; sim.t = 0; sim.rollT = 0;
+  sim.follow = sim.mode === 'test';
+  sim.why = '';
+  sim.stats = { top: 0, maxG: -99, minG: 99, maxLat: 0, air: 0, time: 0 };
+  closeWinQuiet('ratings');
+  layoutUI();
+}
+function stopRun() {
+  sim.active = false; sim.state = 'idle'; sim.path = null; sim.ride = null;
+  closeWinQuiet('ratings');
+  layoutUI();
+}
+
+function forcesAt(ride, st, v) {
+  var G = ridePhysics(ride).gravity;
+  var f = { x: st.k.x * v * v, y: st.k.y * v * v, z: st.k.z * v * v + G };
+  return { vert: v3dot(f, st.u) / G, lat: v3dot(f, st.r) / G };
+}
+
+function stepSim(dt) {
+  if (sim.state !== 'running' || !sim.ride) return;
+  var ride = sim.ride, P = ridePhysics(ride);
+  var set = rideType(ride.typeId).pieceSet;
+  var st = sampleAt(sim.s);
+  var def = PIECE_SETS[set][ride.pieces[st.owner].type];
+
+  var a = -P.gravity * st.t.z - P.friction * sim.v - P.drag * sim.v * Math.abs(sim.v);
+  if (def.brake && sim.v > P.brakeSpeed) a -= P.brakeForce;
+  sim.v += a * dt;
+  // the chain only pulls a train that is still going forwards, or one that
+  // cannot climb shuffles back and forth for ever instead of failing
+  if (def.chain && sim.v >= 0 && sim.v < P.liftSpeed) sim.v = P.liftSpeed;
+  sim.s += sim.v * dt;
+  sim.t += dt;
+
+  var g = forcesAt(ride, st, sim.v), s = sim.stats;
+  s.time = sim.t;
+  s.top = Math.max(s.top, sim.v);
+  s.maxG = Math.max(s.maxG, g.vert);
+  s.minG = Math.min(s.minG, g.vert);
+  s.maxLat = Math.max(s.maxLat, Math.abs(g.lat));
+  if (g.vert < P.airtimeUnder) s.air += dt;
+
+  if (sim.v < P.rollbackSpeed) sim.rollT += dt * P.rollbackRate;
+  else if (!def.chain && sim.v < P.stallSpeed) sim.rollT += dt;
+  else sim.rollT = 0;
+  if (sim.rollT > P.stallAfter) {
+    sim.state = 'stalled';
+    sim.why = sim.v < 0 ? 'IT ROLLED BACK' : 'THE TRAIN STALLED';
+    toast('THE TRAIN HAS STALLED!');
+    layoutUI();
+    return;
+  }
+  if (sim.s >= sim.path.len) {
+    sim.s = sim.path.len;
+    sim.state = 'done';
+    sim.why = 'COMPLETED THE LAP';
+    computeRatings(ride);
+    saveBest(ride);
+    saveGame();
+    openRatingsWin(ride);
+    layoutUI();
+  }
+}
+
+function saveBest(ride) {
+  if (ride.ratings.excitement <= best) return;
+  best = ride.ratings.excitement;
+  try { localStorage.setItem(BEST_KEY, String(best)); } catch (e) {}
+}
+
+/* ── the train ── */
+
+function projectWorld(ride, mx, my, mz) {
+  var P = ridePhysics(ride);
+  var tx = mx / P.tileMetres, ty = my / P.tileMetres, lz = mz / P.levelMetres;
+  var rx = rotX(tx, ty), ry = rotY(tx, ty);
+  return { sx: (rx - ry) * HW + cam.x + HW, sy: (rx + ry) * HH - lz * ZH + cam.y + HH };
+}
+function projectDir(tx, ty, lz) {
+  var drx, dry;
+  switch (cam.rot) {
+    case 1: drx = ty; dry = -tx; break;
+    case 2: drx = -tx; dry = -ty; break;
+    case 3: drx = -ty; dry = tx; break;
+    default: drx = tx; dry = ty;
+  }
+  return { x: (drx - dry) * HW, y: (drx + dry) * HH - lz * ZH };
+}
+
+var CAR_COLS = ['#e0402c', '#d03a2a', '#c03626', '#b03222'];
+
+function drawCar(g, ride, st, idx) {
+  var P = ridePhysics(ride);
+  var pos = projectWorld(ride, st.x, st.y, st.z);
+  var d = projectDir(st.t.x / P.tileMetres, st.t.y / P.tileMetres, st.t.z / P.levelMetres);
+  var m = Math.hypot(d.x, d.y) || 1;
+  var nx = d.x / m, ny = d.y / m;
+  var col = CAR_COLS[idx % CAR_COLS.length];
+  var inverted = st.u.z < -0.25;
+
+  for (var i = -5; i <= 5; i++) {
+    var x = Math.round(pos.sx + nx * i * 0.95), y = Math.round(pos.sy + ny * i * 0.95);
+    g.fillStyle = '#2a1210'; g.fillRect(x, y - 1, 1, 3);
+    g.fillStyle = col;       g.fillRect(x, y - 5, 1, 4);
+    g.fillStyle = shadeHex(col, 1.3); g.fillRect(x, y - 5, 1, 1);
+    if (!inverted && (i === -3 || i === 1)) {
+      g.fillStyle = '#e8c49a'; g.fillRect(x, y - 7, 1, 2);
+    }
+  }
+}
+
+var carMap = {};
+function buildCarMap() {
+  carMap = {};
+  if (!sim.active || !sim.path || !sim.ride) return;
+  var P = ridePhysics(sim.ride);
+  for (var i = 0; i < P.cars; i++) {
+    var st = sampleAt(sim.s - i * P.carGap);
+    var key = clamp(Math.round(st.x / P.tileMetres), 0, WORLD - 1) + ',' +
+              clamp(Math.round(st.y / P.tileMetres), 0, WORLD - 1);
+    (carMap[key] || (carMap[key] = [])).push({ st: st, i: i });
+  }
 }
 
 /* ═══════════════════════════ park ═══════════════════════════ */
@@ -1905,7 +2232,11 @@ function layoutUI() {
                      on: build.piece === pal[pi],
                      disabled: !!checkPiece(build.ride, pal[pi]) });
     }
-    buttons.push({ id: 'do_build', x: bw.x + 5, y: bw.y + 71, w: 52, h: 18, label: 'BUILD' });
+    if (build.ride.complete) {
+      buttons.push({ id: 'do_test', x: bw.x + 5, y: bw.y + 71, w: 52, h: 18, label: 'TEST' });
+    } else {
+      buttons.push({ id: 'do_build', x: bw.x + 5, y: bw.y + 71, w: 52, h: 18, label: 'BUILD' });
+    }
     buttons.push({ id: 'do_undo',  x: bw.x + 61, y: bw.y + 71, w: 40, h: 18, label: 'UNDO' });
   } else if (findWin('build')) {
     closeWinQuiet('build');
@@ -1918,6 +2249,22 @@ function layoutUI() {
     buttons.push({ id: 'st_cancel', x: uiW - 64,  y: 19, w: 60, h: 18, label: 'CANCEL' });
   } else if (build.mode === 'entrance' || build.mode === 'exit') {
     buttons.push({ id: 'door_skip', x: uiW - 64, y: 19, w: 60, h: 18, label: 'LATER' });
+  }
+
+  if (sim.active) {
+    var tw = findWin('test');
+    if (!tw) tw = openWinRaw({ id: 'test', title: 'TEST RUN', w: 132, h: 13 + 52,
+                               x: 8, y: uiH - 90, ride: sim.ride ? sim.ride.id : 0,
+                               draw: testWinBody });
+    if (sim.state === 'running') {
+      buttons.push({ id: 'sim_stop', x: tw.x + 5,  y: tw.y + tw.h - 22, w: 42, h: 18, label: 'STOP' });
+      buttons.push({ id: 'sim_cam',  x: tw.x + 51, y: tw.y + tw.h - 22, w: 38, h: 18, label: 'CAM', on: sim.follow });
+    } else {
+      buttons.push({ id: 'sim_stop',  x: tw.x + 5,  y: tw.y + tw.h - 22, w: 44, h: 18, label: 'CLOSE' });
+      buttons.push({ id: 'sim_again', x: tw.x + 53, y: tw.y + tw.h - 22, w: 44, h: 18, label: 'AGAIN' });
+    }
+  } else if (findWin('test')) {
+    closeWinQuiet('test');
   }
 
   placeWins();
@@ -1967,6 +2314,10 @@ function pressButton(b) {
     case 'done':    disarm(); break;
     case 'do_build': if (build.ride) placeRidePiece(build.ride, build.piece); break;
     case 'do_undo':  if (build.ride) undoRidePiece(build.ride); break;
+    case 'do_test':  if (build.ride) startRun(build.ride, 'test'); break;
+    case 'sim_stop': stopRun(); break;
+    case 'sim_again': if (sim.ride) startRun(sim.ride, 'test'); break;
+    case 'sim_cam':  sim.follow = !sim.follow; layoutUI(); break;
     case 'st_turn':
       if (build.station) build.station.d = (build.station.d + 1) % 4;
       break;
@@ -2101,6 +2452,9 @@ function drawWorld(g) {
 
       var tk = trackMap[w.x + ',' + w.y];
       if (tk) for (var ti = 0; ti < tk.length; ti++) drawPiece(g, tk[ti].set, tk[ti].p);
+
+      var cars = carMap[w.x + ',' + w.y];
+      if (cars) for (var ci = 0; ci < cars.length; ci++) drawCar(g, sim.ride, cars[ci].st, cars[ci].i);
 
       // a faint grid over everything you are allowed to build on
       if (armed() && buildableHere(t)) {
@@ -2360,6 +2714,89 @@ function drawPieceIcon(g, type, bx, by, col) {
   }
 }
 
+function testWinBody(g, win) {
+  var r = sim.ride;
+  if (!r || !sim.stats) return;
+  var s2 = sim.stats, lines, col = PAL.uiText;
+  if (sim.state === 'running' && sim.path) {
+    var st = sampleAt(sim.s), f = forcesAt(r, st, sim.v);
+    lines = ['SPEED ' + Math.round(sim.v * MPH) + ' MPH',
+             'G ' + f.vert.toFixed(1) + '  LAT ' + Math.abs(f.lat).toFixed(1),
+             'AIRTIME ' + s2.air.toFixed(1) + ' S'];
+  } else {
+    col = sim.state === 'stalled' ? '#7a1f18' : '#12401c';
+    lines = [sim.why,
+             'TOP ' + Math.round(s2.top * MPH) + ' MPH  ' + s2.time.toFixed(0) + ' S',
+             'MAX G ' + s2.maxG.toFixed(1) + ' AIR ' + s2.air.toFixed(1) + 'S'];
+  }
+  for (var i = 0; i < lines.length; i++) {
+    text(g, lines[i], win.x + 5, win.y + 17 + i * 10, i === 0 ? col : PAL.uiText);
+  }
+}
+
+function openTestWin(ride) {
+  openWin({
+    id: 'test', title: 'TEST RUN', w: 132, h: 13 + 52, ride: ride.id,
+    draw: function (g, win) {
+      var r = rideById(win.ride);
+      if (!r) return;
+      var s2 = sim.stats, lines, col = PAL.uiText;
+      if (sim.state === 'running' && sim.path) {
+        var st = sampleAt(sim.s), f = forcesAt(r, st, sim.v);
+        lines = ['SPEED ' + Math.round(sim.v * MPH) + ' MPH',
+                 'G ' + f.vert.toFixed(1) + '  LAT ' + Math.abs(f.lat).toFixed(1),
+                 'AIRTIME ' + s2.air.toFixed(1) + ' S'];
+      } else {
+        col = sim.state === 'stalled' ? '#7a1f18' : '#12401c';
+        lines = [sim.why,
+                 'TOP ' + Math.round(s2.top * MPH) + ' MPH  ' + s2.time.toFixed(0) + ' S',
+                 'MAX G ' + s2.maxG.toFixed(1) + ' AIR ' + s2.air.toFixed(1) + 'S'];
+      }
+      for (var i = 0; i < lines.length; i++) {
+        text(g, lines[i], win.x + 5, win.y + 17 + i * 10, i === 0 ? col : PAL.uiText);
+      }
+    }
+  });
+}
+
+function openRatingsWin(ride) {
+  var rw = Math.min(uiW - 12, 200), rh = 13 + 118;
+  openWin({
+    id: 'ratings', title: 'RIDE RATINGS', w: rw, h: rh,
+    x: (uiW - rw) >> 1, y: Math.max(20, (uiH - rh) >> 1),
+    ride: ride.id,
+    draw: function (g, win) {
+      var r = rideById(win.ride);
+      if (!r || !r.stats) return;
+      var x = win.x + 6, y = win.y + 17;
+      text(g, r.name, x, y, PAL.uiBar); y += 11;
+      var rows = [
+        ['EXCITEMENT', r.ratings.excitement, '#12401c'],
+        ['INTENSITY', r.ratings.intensity, r.ratings.intensity >= 8 ? '#7a1f18' : PAL.uiText],
+        ['NAUSEA', r.ratings.nausea, r.ratings.nausea >= 6 ? '#7a1f18' : PAL.uiText]
+      ];
+      for (var i = 0; i < rows.length; i++) {
+        text(g, rows[i][0], x, y, PAL.uiText);
+        text(g, rateText(rows[i][1]), x + 66, y, rows[i][2]);
+        y += 10;
+      }
+      g.fillStyle = PAL.uiLo; g.fillRect(x, y + 2, win.w - 12, 1);
+      g.fillStyle = PAL.uiHi; g.fillRect(x, y + 3, win.w - 12, 1);
+      y += 8;
+      var s2 = r.stats, geo = r.geom;
+      var facts = [
+        'TOP SPEED ' + Math.round(s2.top * MPH) + ' MPH',
+        'TIME ' + s2.time.toFixed(0) + ' S    LENGTH ' + Math.round(geo.length) + ' M',
+        'DROPS ' + geo.drops.length + '    BIGGEST ' + geo.biggest.toFixed(1) + ' M',
+        'MAX G ' + s2.maxG.toFixed(1) + '    AIRTIME ' + s2.air.toFixed(1) + ' S',
+        'INVERSIONS ' + geo.inversions + '    TURNS ' + geo.turns
+      ];
+      for (i = 0; i < facts.length; i++) { text(g, facts[i], x, y, PAL.uiText); y += 9; }
+      if (r.ratings.intensity >= 10) text(g, 'TOO INTENSE FOR GUESTS', x, y, '#7a1f18');
+    }
+  });
+}
+
 function drawBuildWinBody(g, win) {
   var ride = build.ride;
   if (!ride) return;
@@ -2598,6 +3035,7 @@ function render() {
   bctx.fillStyle = PAL.vd;
   bctx.fillRect(0, 0, bufW, bufH);
   buildTrackMap();
+  buildCarMap();
   drawWorld(bctx);
   drawStrokeGhost(bctx);
   drawTrackGhost(bctx);
@@ -2751,6 +3189,7 @@ function onMove(e) {
     cam.x += (p.cx - prevX) * k;
     cam.y += (p.cy - prevY) * k;
     clampCam();
+    if (sim.follow) { sim.follow = false; layoutUI(); }   // dragging takes over
   }
   e.preventDefault();
 }
@@ -3039,6 +3478,15 @@ function update(dt) {
     park.clock = 0;
     park.month++;
     if (park.month >= MONTHS.length) { park.month = 0; park.year++; }
+  }
+
+  // two substeps: the curvature through a loop is tight enough to want them
+  if (sim.active) { stepSim(dt / 2); stepSim(dt / 2); }
+  if (sim.active && sim.follow && sim.path && sim.ride) {
+    var st = sampleAt(sim.s), pos = projectWorld(sim.ride, st.x, st.y, st.z);
+    cam.x += (bufW / 2 - pos.sx) * 0.12;
+    cam.y += (bufH * 0.46 - pos.sy) * 0.12;
+    clampCam();
   }
 
   saveT += dt;
