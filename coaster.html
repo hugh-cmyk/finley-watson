@@ -1257,6 +1257,7 @@ function commitStroke() {
   if (!st || !st.plans) { build.stroke = null; return; }
   if (!build.ok) {
     if (build.problem) toast(build.problem.text);
+    sfxDeny();
     build.stroke = null;
     return;
   }
@@ -1273,6 +1274,7 @@ function commitStroke() {
     n++;
   }
   park.cash -= spent;
+  sfxBuild();
   if (build.tool.kind === 'land') park.books.land += spent;
   else park.books.building += spent;
   if (build.tool.kind === 'facility') {
@@ -1584,7 +1586,7 @@ function addPiece(ride, id, x, y, z, d) {
 
 function placeRidePiece(ride, id) {
   var why = checkPiece(ride, id);
-  if (why) { toast(why); return false; }
+  if (why) { toast(why); sfxDeny(); return false; }
   var c = ride.cursor, def = pieceDef(ride, id);
   addPiece(ride, id, c.x, c.y, c.z, c.d);
   park.cash -= def.cost;
@@ -1594,6 +1596,7 @@ function placeRidePiece(ride, id) {
   ride.cursor = pieceExit(def, c.x, c.y, c.z, c.d);
   if (closed) {
     ride.complete = true;
+    sfxGood();
     toast('CIRCUIT COMPLETE - NOW ADD A WAY IN AND OUT');
     build.mode = 'entrance';
   }
@@ -2018,6 +2021,7 @@ function stepSim(dt) {
   if (sim.rollT > P.stallAfter) {
     sim.state = 'stalled';
     sim.why = sim.v < 0 ? 'IT ROLLED BACK' : 'THE TRAIN STALLED';
+    sfxBad();
     toast('THE TRAIN HAS STALLED!');
     layoutUI();
     return;
@@ -2027,16 +2031,16 @@ function stepSim(dt) {
     sim.state = 'done';
     sim.why = 'COMPLETED THE LAP';
     computeRatings(ride);
-    saveBest(ride);
+    sfxGood();
     saveGame();
     openRatingsWin(ride);
     layoutUI();
   }
 }
 
-function saveBest(ride) {
-  if (ride.ratings.excitement <= best) return;
-  best = ride.ratings.excitement;
+function saveBest() {
+  if (park.rating <= best) return;
+  best = park.rating;
   try { localStorage.setItem(BEST_KEY, String(best)); } catch (e) {}
 }
 
@@ -2325,7 +2329,7 @@ function stepGuests(dt) {
     }
 
     stepWalk(g, dt);
-    maybeLitter(g);
+    maybeLitter(g, dt);
     if (g.state === 'gone') { guests.splice(i, 1); continue; }
   }
 
@@ -2344,7 +2348,13 @@ function stepGuests(dt) {
   park.guests = guests.length;
 
   park.ratingT -= dt;
-  if (park.ratingT <= 0) { park.ratingT = 3; park.lost = countLost(); computeParkRating(); }
+  if (park.ratingT <= 0) {
+    park.ratingT = 3;
+    park.lost = countLost();
+    computeParkRating();
+    saveBest();
+    checkHints();
+  }
 
   operateRides(dt);
 }
@@ -2436,15 +2446,19 @@ function leaveQueue(g) {
   g.waited = 0;
 }
 
-/* Guests drop litter on paths with no bin in reach. A bin two tiles away is
-   the difference between a tidy park and a rating that will not climb. */
-function maybeLitter(g) {
-  if (Math.random() > 0.004) return;
+/* Guests drop litter on paths with no bin within reach. The reach is
+   deliberately generous - a bin every few tiles would be a park made of bins -
+   and the rate is per second, not per frame. */
+var BIN_REACH = 7;             // tiles a guest will carry a wrapper
+var LITTER_RATE = 0.01;        // drops per guest per second where none is near
+
+function maybeLitter(g, dt) {
+  if (Math.random() > LITTER_RATE * dt) return;
   var x = Math.round(g.x), y = Math.round(g.y);
   var here = tileAt(x, y);
   if (!here || !here.path || here.object) return;
-  for (var dx = -2; dx <= 2; dx++) {
-    for (var dy = -2; dy <= 2; dy++) {
+  for (var dx = -BIN_REACH; dx <= BIN_REACH; dx++) {
+    for (var dy = -BIN_REACH; dy <= BIN_REACH; dy++) {
       var nb = tileAt(x + dx, y + dy);
       if (nb && nb.object && nb.object.type === 'facility' && nb.object.fid === 'bin') return;
     }
@@ -2857,6 +2871,8 @@ function hitButton(bx, by) {
 /* ─────────────────────────── UI state ─────────────────────────── */
 
 var ui = {
+  title: true,
+  confirm: null,
   selected: null,
   showLinks: false,
   notice: null,
@@ -2957,6 +2973,23 @@ function layoutUI() {
   buttons = [];
   var B = 22, H = 20, gap = 2;
   var right = uiW - 4, bottom = uiH - 4;
+
+  if (ui.confirm) {
+    var cw = Math.min(uiW - 12, 180), ch = 62;
+    var ccx = (uiW - cw) >> 1, ccy = Math.max(20, (uiH - ch) >> 1);
+    ui.confirmWin = { x: ccx, y: ccy, w: cw, h: ch };
+    buttons.push({ id: 'yes', x: ccx + 8, y: ccy + ch - 24, w: 60, h: 18, label: 'YES' });
+    buttons.push({ id: 'no', x: ccx + cw - 68, y: ccy + ch - 24, w: 60, h: 18, label: 'NO' });
+    return;
+  }
+  if (ui.title) {
+    var tw = Math.min(uiW - 20, 218), th = 104;
+    var tx = (uiW - tw) >> 1, ty = Math.max(16, (uiH - th) >> 1);
+    ui.titleWin = { x: tx, y: ty, w: tw, h: th };
+    buttons.push({ id: 'play', x: tx + 10, y: ty + th - 26, w: 78, h: 20, label: 'PLAY' });
+    buttons.push({ id: 'newpark', x: tx + tw - 88, y: ty + th - 26, w: 78, h: 20, label: 'NEW PARK' });
+    return;
+  }
 
   if (ui.notice) {
     var nw = Math.min(uiW - 16, 196);
@@ -3064,6 +3097,13 @@ function layoutUI() {
     closeWinQuiet('test');
   }
 
+  var hw2 = findWin('help');
+  if (hw2) {
+    buttons.push({ id: 'sound', x: hw2.x + 6, y: hw2.y + hw2.h - 22, w: 76, h: 18,
+                   label: muted ? 'SOUND OFF' : 'SOUND ON', on: !muted });
+    buttons.push({ id: 'newpark', x: hw2.x + 88, y: hw2.y + hw2.h - 22, w: 80, h: 18, label: 'NEW PARK' });
+  }
+
   var pw = findWin('park');
   if (pw) {
     buttons.push({ id: 'fee_dn', parkAct: 'fee_dn', x: pw.x + 112, y: pw.y + 71, w: 16, h: 14, label: '-' });
@@ -3118,6 +3158,13 @@ function layoutUI() {
 }
 
 function facilityAction(act) {
+  var hw2 = findWin('help');
+  if (hw2) {
+    buttons.push({ id: 'sound', x: hw2.x + 6, y: hw2.y + hw2.h - 22, w: 76, h: 18,
+                   label: muted ? 'SOUND OFF' : 'SOUND ON', on: !muted });
+    buttons.push({ id: 'newpark', x: hw2.x + 88, y: hw2.y + hw2.h - 22, w: 80, h: 18, label: 'NEW PARK' });
+  }
+
   var pw = findWin('park');
   if (pw) {
     buttons.push({ id: 'fee_dn', parkAct: 'fee_dn', x: pw.x + 112, y: pw.y + 71, w: 16, h: 14, label: '-' });
@@ -3179,6 +3226,7 @@ function rideAction(act, ride) {
 }
 
 function pressButton(b) {
+  sfxTap();
   if (b.win) { closeWin(b.win); return; }
   if (b.rideAct) { rideAction(b.rideAct, rideById(b.rideRef)); return; }
   if (b.facAct) { facilityAction(b.facAct); return; }
@@ -3226,6 +3274,19 @@ function pressButton(b) {
     case 'park':    toggleWin('park', openParkWin); break;
     case 'links':   ui.showLinks = !ui.showLinks; layoutUI(); break;
     case 'rides':   toggleWin('rides', openRidesWin); break;
+    case 'play':    ui.title = false; layoutUI(); break;
+    case 'newpark':
+      ui.confirm = { msg: 'WIPE THIS PARK AND START AGAIN?', act: newPark };
+      layoutUI();
+      break;
+    case 'yes':
+      var act = ui.confirm && ui.confirm.act;
+      ui.confirm = null;
+      if (act) act();
+      layoutUI();
+      break;
+    case 'no': ui.confirm = null; layoutUI(); break;
+    case 'sound': muted = !muted; if (!muted) initAudio(); layoutUI(); break;
     case 'notice_ok': dismissNotice(); break;
     case 'done':    disarm(); break;
     case 'do_build': if (build.ride) placeRidePiece(build.ride, build.piece); break;
@@ -3971,7 +4032,8 @@ function openHelpWin() {
     'PATHS STEP UP AND DOWN A LEVEL',
     'AND BRIDGE STRAIGHT OVER WATER.',
     '',
-    'WINDOWS DRAG BY THEIR TITLE BAR.'
+    'WINDOWS DRAG BY THEIR TITLE BAR.',
+    ''
   ];
   openWin({
     id: 'help', title: 'HOW TO PLAY', w: Math.min(uiW - 16, 218), h: 13 + lines.length * 10 + 5,
@@ -4076,7 +4138,37 @@ function drawArmedChrome(g) {
   }
 }
 
+function drawTitle(g) {
+  var win = ui.titleWin;
+  if (!win) return;
+  windowFrame(g, win.x, win.y, win.w, win.h, 'THRILLSBURY PARK');
+  var cx = win.x + (win.w >> 1);
+  var t1 = 'THRILLSBURY';
+  text(g, t1, cx - (textW(t1, 2) >> 1), win.y + 20, PAL.uiText, 2);
+  var t2 = 'BUILD YOUR OWN PARK';
+  text(g, t2, cx - (textW(t2) >> 1), win.y + 40, PAL.uiBar);
+  var t3 = best > 0 ? 'BEST PARK RATING ' + Math.round(best) : 'NO PARK RATED YET';
+  text(g, t3, cx - (textW(t3) >> 1), win.y + 54, best > 0 ? '#12401c' : PAL.uiDim);
+  var t4 = 'PATHS FIRST, THEN A RIDE.';
+  text(g, t4, cx - (textW(t4) >> 1), win.y + 66, PAL.uiDim);
+}
+
+function drawConfirm(g) {
+  var win = ui.confirmWin;
+  if (!win || !ui.confirm) return;
+  windowFrame(g, win.x, win.y, win.w, win.h, 'ARE YOU SURE?');
+  var lines = wrapText(ui.confirm.msg, Math.floor((win.w - 12) / ADV));
+  for (var i = 0; i < Math.min(2, lines.length); i++) {
+    text(g, lines[i], win.x + 6, win.y + 18 + i * 10, PAL.uiText);
+  }
+}
+
 function drawUI(g) {
+  if (ui.title || ui.confirm) {
+    if (ui.title) drawTitle(g); else drawConfirm(g);
+    for (var t = 0; t < buttons.length; t++) drawButton(g, buttons[t]);
+    return;
+  }
   if (ui.notice) {
     drawStatusBar(g);
     drawNotice(g);
@@ -4147,6 +4239,7 @@ function toUI(e) {            // UI-layer pixels
 }
 
 function onDown(e) {
+  initAudio();
   try { disp.setPointerCapture(e.pointerId); } catch (err) { /* not a live pointer */ }
   var b = toBuf(e);
   pointers.set(e.pointerId, {
@@ -4372,6 +4465,60 @@ window.addEventListener('keydown', function (e) {
 window.addEventListener('keyup', function (e) { keys[e.key] = false; });
 window.addEventListener('blur', function () { keys = {}; });
 
+/* ═══════════════════════════ sound ═══════════════════════════
+   A few synthesised blips. The context is made on the first touch, because
+   iOS will not let it start any other way. Nothing is loaded from a file. */
+var actx = null, muted = false;
+function initAudio() {
+  if (actx || muted) return;
+  try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; }
+}
+function blip(freq, len, type, vol) {
+  if (!actx || muted) return;
+  try {
+    var o = actx.createOscillator(), g = actx.createGain();
+    o.type = type || 'square';
+    o.frequency.value = freq;
+    g.gain.value = vol === undefined ? 0.05 : vol;
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + len);
+    o.connect(g); g.connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + len);
+  } catch (e) {}
+}
+function sfxTap()   { blip(420, 0.05, 'square', 0.035); }
+function sfxBuild() { blip(620, 0.07, 'square', 0.045); }
+function sfxDeny()  { blip(150, 0.12, 'sawtooth', 0.045); }
+function sfxGood()  { blip(660, 0.09, 'square', 0.05);
+                      setTimeout(function () { blip(880, 0.12, 'square', 0.05); }, 90); }
+function sfxBad()   { blip(220, 0.18, 'sawtooth', 0.055); }
+
+/* ═══════════════════════════ hints ═══════════════════════════
+   One nudge at a time, each shown once, aimed at whatever the park is
+   obviously missing. */
+var hintsSeen = {};
+function hint(id, line) {
+  if (hintsSeen[id]) return;
+  hintsSeen[id] = 1;
+  toast(line);
+}
+function checkHints() {
+  if (!Object.keys(pathGraph.nodes).length || pathGraph.nodes[pathKey(world.entrance.x, world.entrance.y)] === undefined) return;
+  var paved = Object.keys(pathGraph.nodes).length;
+  if (paved < 3) { hint('path', 'DRAW A PATH OUT OF THE GATE'); return; }
+  if (!rides.length) { hint('ride', 'NOW PICK RIDES AND SITE A STATION'); return; }
+  var r = rides[0];
+  if (!r.complete) { hint('close', 'BRING THE TRACK BACK TO THE STATION'); return; }
+  if (!r.entranceTile || !r.exitTile) { hint('doors', 'IT NEEDS A WAY IN AND A WAY OUT'); return; }
+  if (!r.tested) { hint('test', 'RUN A TEST LAP BEFORE IT CAN OPEN'); return; }
+  if (r.status !== 'open') { hint('open', 'OPEN IT FROM THE RIDES WINDOW'); return; }
+  var loos = false;
+  for (var i = 0; i < world.tiles.length; i++) {
+    var o = world.tiles[i].object;
+    if (o && o.type === 'facility' && facilityType(o.fid).serves === 'bladder') { loos = true; break; }
+  }
+  if (!loos && park.guests > 12) hint('loos', 'THEY WILL WANT TOILETS BEFORE LONG');
+}
+
 /* ═══════════════════════════ save / load ═══════════════════════════
    Every load goes through migrate(). It steps a save forward one version at
    a time; anything it does not recognise is discarded rather than guessed
@@ -4504,6 +4651,28 @@ function applySave(save) {
   rebuildPathGraph();
 }
 
+function newPark() {
+  generateWorld(20260806);
+  rides = [];
+  guests = [];
+  nextRideId = 1;
+  park.cash = START_CASH; park.owned = ownedCount();
+  park.rating = 500; park.happy = 60; park.guests = 0;
+  park.admissions = 0; park.spawnT = 2; park.clock = 0;
+  park.month = 0; park.year = 1; park.entryFee = 5;
+  park.books = { admissions: 0, tickets: 0, shops: 0, land: 0, building: 0 };
+  hintsSeen = {};
+  build.tool = null; build.mode = null; build.ride = null; build.cat = null;
+  sim.active = false; sim.ride = null; sim.path = null;
+  wins = [];
+  rebuildPathGraph();
+  centreOn(world.entrance.x, world.entrance.y - 6);
+  ui.title = false;
+  saveGame();
+  layoutUI();
+  toast('A FRESH FIELD');
+}
+
 function saveGame() {
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(serialise())); } catch (e) {}
 }
@@ -4562,6 +4731,7 @@ function loadBest() {
 var saveT = 0;
 
 function update(dt) {
+  if (ui.title || ui.confirm) return;
   var pan = 160 * dt;
   if (keys.ArrowLeft || keys.a) cam.x += pan;
   if (keys.ArrowRight || keys.d) cam.x -= pan;
