@@ -108,9 +108,9 @@ var HH      = 8;       // half tile height
 var ZH      = 8;       // pixels per height level
 var MAX_Z   = 10;      // highest land level
 
-var ZOOMS   = [2, 3, 4, 6, 8];   // device pixels per world pixel
+var ZOOMS   = [1, 2, 3, 4, 6, 8];   // device pixels per world pixel; 1 is the map view
 var TARGET_BUF_W = 560;          // aim for roughly this many world px across
-var MAX_BUF_PX   = 460000;       // buffer area guard (perf)
+var MAX_BUF_PX   = 3700000;      // buffer area guard; big enough for the map view
 
 var STEP    = 1 / 60;  // fixed simulation step
 var MAX_DT  = 0.1;     // clamp so a backgrounded tab doesn't fast-forward
@@ -2483,6 +2483,7 @@ function drawObject(g, obj, sx, sy) {
 }
 
 function drawWorld(g) {
+  var far = scale <= 1;                 // map view: ground, water, paths, track
   var maxD = 2 * WORLD - 2;
   // visible diagonals: screen y of a diagonal is d*HH - z*ZH + cam.y
   var dLo = Math.floor((-cam.y - 48) / HH);
@@ -2510,7 +2511,7 @@ function drawWorld(g) {
       var hr = tr ? surfaceLevel(tr) : null;
       var hl = tl ? surfaceLevel(tl) : null;
       var kind = wet ? 'wet' : (t.h >= 4 ? 'rock' : 'dirt');
-      var lip = !wet && t.surface === 'grass';
+      var lip = !far && !wet && t.surface === 'grass';
 
       var dR = (hr === null) ? lvl * ZH + 10 : (lvl - hr) * ZH;
       if (dR > 0) g.drawImage(faceSprite('r', dR, kind, lip, out), sx + 16, sy + 8);
@@ -2532,7 +2533,8 @@ function drawWorld(g) {
 
       // plot fence, along every owned edge that meets land you do not own —
       // with a gap where the gate is, so people can actually get in
-      if (t.owned && !(t.object && t.object.type === 'entrance')) {
+      if (far) { /* no fence or for-sale signs in the map view */ }
+      else if (t.owned && !(t.object && t.object.type === 'entrance')) {
         for (var e = 0; e < 4; e++) {
           var wd = (e + cam.rot) % 4;                 // screen edge → world dir
           var nb = tileAt(w.x + DX[wd], w.y + DY[wd]);
@@ -2570,7 +2572,7 @@ function drawWorld(g) {
       if (cars) for (var ci = 0; ci < cars.length; ci++) drawCar(g, sim.ride, cars[ci].st, cars[ci].i);
 
       // a faint grid over everything you are allowed to build on
-      if (armed() && buildableHere(t)) {
+      if (!far && armed() && buildableHere(t)) {
         g.globalAlpha = 0.22;
         drawTileOutline(g, sx, sy, build.tool.tint);
         g.globalAlpha = 1;
@@ -2580,7 +2582,7 @@ function drawWorld(g) {
         drawTileOutline(g, sx, sy, '#ffffff');
       }
 
-      if (t.object) drawObject(g, t.object, sx, sy);
+      if (t.object && !(far && t.object.type === 'tree')) drawObject(g, t.object, sx, sy);
     }
   }
 }
