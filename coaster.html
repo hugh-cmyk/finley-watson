@@ -959,12 +959,14 @@ function strokeTiles(from, to, shape) {
   return out;
 }
 
-/* Price the whole stroke before committing, so the ghost can show the bill. */
+/* Price the whole stroke before committing, so the ghost can show the bill.
+   Two failures need telling apart: one is fixed by earning money, the other
+   by dragging somewhere else, and they are never phrased the same way. */
 function planStroke() {
   var st = build.stroke;
   if (!st || !build.tool) { build.cost = 0; build.ok = false; return; }
   var tiles = strokeTiles(st.from, st.to, build.tool.drag);
-  var cost = 0, any = false, why = '';
+  var cost = 0, nOk = 0, nBlocked = 0, why = '', whyQuiet = '';
   st.plans = [];
   for (var i = 0; i < tiles.length; i++) {
     var tl = tiles[i], plan;
@@ -973,20 +975,31 @@ function planStroke() {
     else plan = landPlan(tl.x, tl.y);
     plan.x = tl.x; plan.y = tl.y;
     st.plans.push(plan);
-    if (plan.ok) { cost += plan.cost || 0; any = true; }
-    else if (!plan.silent && !why) why = plan.why;
+    if (plan.ok) { cost += plan.cost || 0; nOk++; }
+    else if (!plan.silent) { nBlocked++; if (!why) why = plan.why; }
+    else if (!whyQuiet) whyQuiet = plan.why;
   }
   st.tiles = tiles;
+  st.nOk = nOk;
   build.cost = cost;
-  build.ok = any && cost <= park.cash;
-  build.why = !any ? (why || 'NOTHING TO DO HERE') : (cost > park.cash ? 'NOT ENOUGH MONEY' : '');
+  build.ok = nOk > 0 && cost <= park.cash;
+
+  build.problem = null;
+  if (cost > park.cash) {
+    build.problem = { kind: 'money', text: 'SHORT BY ' + money(cost - park.cash) };
+  } else if (nOk === 0) {
+    // when the whole run is a no-op, say which no-op it is
+    build.problem = { kind: 'place', text: why || whyQuiet || 'NOTHING TO DO HERE' };
+  } else if (nBlocked > 0) {
+    build.problem = { kind: 'skip', text: nBlocked + ' TILES SKIPPED - ' + why };
+  }
 }
 
 function commitStroke() {
   var st = build.stroke;
   if (!st || !st.plans) { build.stroke = null; return; }
   if (!build.ok) {
-    if (build.why) toast(build.why);
+    if (build.problem) toast(build.problem.text);
     build.stroke = null;
     return;
   }
@@ -1032,7 +1045,27 @@ var TOOLS = {
   land:  { id: 'land',  cat: 'LAND',  label: 'BUY',   kind: 'land',
            drag: 'rect', tint: '#3fd94e', hint: 'BUY LAND' }
 };
-var CATEGORIES = ['PATHS', 'LAND'];
+/* Categories are derived, not listed: a ride type or a facility appearing in
+   its table puts a button in the menu with no UI change at all. FACILITIES
+   and SCENERY show up the moment their tables gain entries. */
+function categories() {
+  var seen = {}, out = [];
+  for (var k in TOOLS) if (!seen[TOOLS[k].cat]) { seen[TOOLS[k].cat] = 1; out.push(TOOLS[k].cat); }
+  if (RIDE_TYPES.length && !seen.RIDES) out.unshift('RIDES');
+  return out;
+}
+function categoryOptions(cat) {
+  var out = [];
+  if (cat === 'RIDES') {
+    for (var i = 0; i < RIDE_TYPES.length; i++) {
+      out.push({ id: 'ride_' + RIDE_TYPES[i].id, label: RIDE_TYPES[i].name.split(' ')[0],
+                 ride: RIDE_TYPES[i] });
+    }
+    return out;
+  }
+  for (var k in TOOLS) if (TOOLS[k].cat === cat) out.push(TOOLS[k]);
+  return out;
+}
 
 /* The build-mode state machine. One armed tool at a time; a stroke is a drag
    in progress. Ride construction reuses this in phase 4. */
@@ -1260,6 +1293,7 @@ function windowFrame(g, x, y, w, h, title) {
   bevel(g, x, y + 13, w, h - 13, false);
 }
 function drawButton(g, b) {
+  if (b.bare) return;
   var down = !!b.pressed, sunk = down || b.on;
   g.fillStyle = down ? '#8e8e8e' : (b.on ? '#c8c8c8' : PAL.uiFace);
   g.fillRect(b.x, b.y, b.w, b.h);
@@ -1292,7 +1326,6 @@ function hitButton(bx, by) {
 
 var ui = {
   selected: null,
-  showHelp: false,
   showLinks: false,
   notice: null,
   toast: '', toastT: 0,
@@ -1300,6 +1333,81 @@ var ui = {
 };
 
 function toast(msg) { ui.toast = msg; ui.toastT = 3; }
+
+/* ═══════════════════════════ windows ═══════════════════════════
+   In-canvas windows: dragged by the title bar, closed with a box big enough
+   for a thumb, several open at once. On a narrow screen they stop floating
+   and stack down the left instead, because a window dragged off a phone is
+   a window you have lost. */
+
+var wins = [];                      // open windows, front-most last
+/* Measured in real screen width, not UI pixels: what matters is whether a
+   person has room for two windows side by side. */
+function narrowLayout() { return (disp.width / dpr) < 520; }
+
+function openWin(spec) {
+  var existing = findWin(spec.id);
+  if (existing) {                   // already open: bring it forward, refresh
+    for (var k in spec) if (k !== 'x' && k !== 'y') existing[k] = spec[k];
+    frontWin(spec.id);
+    layoutUI();
+    return existing;
+  }
+  var win = {};                     // carry every field a window brought with it
+  for (var f in spec) win[f] = spec[f];
+  win.x = spec.x === undefined ? 8 + wins.length * 10 : spec.x;
+  win.y = spec.y === undefined ? 40 + wins.length * 12 : spec.y;
+  wins.push(win);
+  layoutUI();
+  return win;
+}
+function findWin(id) {
+  for (var i = 0; i < wins.length; i++) if (wins[i].id === id) return wins[i];
+  return null;
+}
+function closeWin(id) {
+  for (var i = 0; i < wins.length; i++) {
+    if (wins[i].id === id) { wins.splice(i, 1); break; }
+  }
+  layoutUI();
+}
+function toggleWin(id, maker) {
+  if (findWin(id)) closeWin(id); else maker();
+}
+function frontWin(id) {
+  var w = findWin(id);
+  if (!w) return;
+  wins.splice(wins.indexOf(w), 1);
+  wins.push(w);
+}
+
+/* Stacked on a narrow screen, floating but always partly on screen on a
+   wide one. */
+function placeWins() {
+  var y = 20;
+  for (var i = 0; i < wins.length; i++) {
+    var w = wins[i];
+    if (narrowLayout()) {
+      w.x = 4;
+      w.w = Math.min(Math.floor(disp.width / uiScale) - 8, 300);   // measured, not derived
+      w.y = y;
+      y += w.h + 4;
+    } else {
+      w.x = clamp(w.x, 2 - w.w + 40, uiW - 40);
+      w.y = clamp(w.y, 17, uiH - 20);
+    }
+  }
+}
+
+function drawWin(g, w) {
+  windowFrame(g, w.x, w.y, w.w, w.h, w.title);
+  g.save();
+  g.beginPath();
+  g.rect(w.x + 1, w.y + 13, w.w - 2, w.h - 14);
+  g.clip();
+  w.draw(g, w);
+  g.restore();
+}
 
 function layoutUI() {
   buttons = [];
@@ -1326,46 +1434,56 @@ function layoutUI() {
 
   var ry = cy - H - 8;
   buttons.push({ id: 'links', x: right - B * 2 - 5, y: ry, w: B, h: H, label: 'LNK', on: ui.showLinks });
-  buttons.push({ id: 'help',  x: right - B - 3,     y: ry, w: B, h: H, label: '?',   on: ui.showHelp });
+  buttons.push({ id: 'help',  x: right - B - 3,     y: ry, w: B, h: H, label: '?',   on: !!findWin('help') });
 
   // build menu: a row of categories, and the options for the open one above it
+  buttons.push({ id: 'park', x: 0, y: 0, w: uiW, h: 15, bare: true });
+
   var CW = 54, CH = 22, cbx = 4, cby = bottom - CH;
-  ui.catBar = { x: cbx, y: cby, w: CATEGORIES.length * (CW + 2) + 4, h: CH + 4 };
-  for (var ci = 0; ci < CATEGORIES.length; ci++) {
-    buttons.push({ id: 'cat_' + CATEGORIES[ci], cat: CATEGORIES[ci],
+  var cats = categories();
+  ui.catBar = { x: cbx, y: cby, w: cats.length * (CW + 2) + 4, h: CH + 4 };
+  for (var ci = 0; ci < cats.length; ci++) {
+    buttons.push({ id: 'cat_' + cats[ci], cat: cats[ci],
                    x: cbx + 2 + ci * (CW + 2), y: cby + 2, w: CW, h: CH,
-                   label: CATEGORIES[ci], on: build.cat === CATEGORIES[ci] });
+                   label: cats[ci], on: build.cat === cats[ci] });
   }
   ui.bottomStack = CH + 8;
   ui.toolBar = null;
   if (build.cat) {
-    var opts = [];
-    for (var k in TOOLS) if (TOOLS[k].cat === build.cat) opts.push(TOOLS[k]);
+    var opts = categoryOptions(build.cat);
     var TW = 54, TH = 22, tby = cby - TH - 6;
     ui.toolBar = { x: cbx, y: tby - 2, w: opts.length * (TW + 2) + 4, h: TH + 4, opts: opts };
     ui.bottomStack = CH + TH + 14;
     for (var oi = 0; oi < opts.length; oi++) {
-      buttons.push({ id: 'tool_' + opts[oi].id, tool: opts[oi].id,
+      var opt = opts[oi];
+      buttons.push({ id: 'tool_' + opt.id, tool: opt.ride ? null : opt.id,
+                     rideType: opt.ride ? opt.ride.id : null,
                      x: cbx + 2 + oi * (TW + 2), y: tby, w: TW, h: TH,
-                     label: opts[oi].label, on: build.tool === opts[oi] });
+                     label: opt.label, on: build.tool === opt });
     }
   }
   if (armed()) {
     buttons.push({ id: 'done', x: uiW - 52 - 4, y: 19, w: 52, h: 18, label: 'DONE' });
   }
 
-  if (ui.showHelp) {
-    var hw = Math.min(uiW - 16, 218), hh = 126;
-    ui.helpWin = { x: (uiW - hw) >> 1, y: Math.max(20, (uiH - hh) >> 1), w: hw, h: hh };
-  } else {
-    ui.helpWin = null;
+  placeWins();
+  for (var wi = 0; wi < wins.length; wi++) {
+    var w = wins[wi];
+    buttons.push({ id: 'winclose_' + w.id, win: w.id,
+                   x: w.x + w.w - 13, y: w.y + 1, w: 11, h: 11, label: 'X' });
   }
+
 }
 
 function pressButton(b) {
+  if (b.win) { closeWin(b.win); return; }
   if (b.cat) {                              // a category opens or closes its row
     build.cat = build.cat === b.cat ? null : b.cat;
     if (!build.cat) disarm(); else layoutUI();
+    return;
+  }
+  if (b.rideType) {                         // ride construction lands in phase 4
+    toast('RIDE BUILDING COMES NEXT');
     return;
   }
   if (b.tool) {                             // arming and disarming the same way
@@ -1376,7 +1494,8 @@ function pressButton(b) {
     case 'zoomin':  setZoom(zoomIdx + 1); break;
     case 'zoomout': setZoom(zoomIdx - 1); break;
     case 'rotate':  rotate(1); break;
-    case 'help':    ui.showHelp = !ui.showHelp; layoutUI(); break;
+    case 'help':    toggleWin('help', openHelpWin); break;
+    case 'park':    toggleWin('park', openParkWin); break;
     case 'links':   ui.showLinks = !ui.showLinks; layoutUI(); break;
     case 'notice_ok': dismissNotice(); break;
     case 'done':    disarm(); break;
@@ -1546,6 +1665,23 @@ function buildableHere(t) {
   return t.owned;
 }
 
+/* The title bar of the front-most window under a point, if any. */
+function winTitleAt(ux, uy) {
+  for (var i = wins.length - 1; i >= 0; i--) {
+    var w = wins[i];
+    if (ux >= w.x && ux <= w.x + w.w && uy >= w.y && uy <= w.y + 13) return w;
+  }
+  return null;
+}
+/* Any part of any window — used to keep taps off the world underneath. */
+function winAt(ux, uy) {
+  for (var i = wins.length - 1; i >= 0; i--) {
+    var w = wins[i];
+    if (ux >= w.x && ux <= w.x + w.w && uy >= w.y && uy <= w.y + w.h) return w;
+  }
+  return null;
+}
+
 function neighbourR(rx, ry) {                 // neighbour in rotated space
   if (rx < 0 || ry < 0 || rx >= WORLD || ry >= WORLD) return null;
   var w = unrot(rx, ry);
@@ -1586,50 +1722,77 @@ function drawStrokeGhost(g) {
   }
 }
 
-function drawInfoWindow(g) {
-  var title = 'PARK', body = [];
-  if (ui.selected) {
-    var t = tileAt(ui.selected.x, ui.selected.y);
-    title = 'TILE ' + ui.selected.x + ',' + ui.selected.y;
-    body.push(isWater(t) ? 'WATER - DEPTH ' + (t.water - t.h)
-                         : (t.surface === 'sand' ? 'SAND' : 'GRASS') + ' - LEVEL ' + t.h);
-    if (t.owned) body.push('PART OF THE PARK');
-    else if (t.forSale) body.push('FOR SALE - ' + money(landPrice()));
-    else body.push('OUT OF BOUNDS');
-  } else {
-    body.push('TAP A TILE TO INSPECT');
-    body.push('DRAG PAN - PINCH ZOOM');
-  }
-  var w = 10;
-  for (var i = 0; i < body.length; i++) w = Math.max(w, textW(body[i]));
-  w = Math.min(uiW - 8, Math.max(w, textW(title) + 20) + 10);
-  var h = 13 + body.length * 10 + 4;
-  var x = 4, y = uiH - h - 4 - (ui.bottomStack || 0);
-  windowFrame(g, x, y, w, h, title);
-  for (i = 0; i < body.length; i++) {
-    text(g, body[i], x + 5, y + 17 + i * 10, i === 0 ? PAL.uiText : PAL.uiDim);
-  }
+function openTileWin(t) {
+  openWin({
+    id: 'tile', title: 'TILE ' + t.x + ',' + t.y, w: 150, h: 13 + 32,
+    tile: { x: t.x, y: t.y },
+    draw: function (g, win) {
+      var tl = tileAt(win.tile.x, win.tile.y);
+      if (!tl) return;
+      var lines = [
+        isWater(tl) ? 'WATER - DEPTH ' + (tl.water - tl.h)
+                    : (tl.surface === 'sand' ? 'SAND' : 'GRASS') + ' - LEVEL ' + tl.h,
+        tl.owned ? 'PART OF THE PARK'
+                 : (tl.forSale ? 'FOR SALE - ' + money(landPrice()) : 'OUT OF BOUNDS')
+      ];
+      if (tl.path) {
+        lines[0] = (tl.path.type === 'queue' ? 'QUEUE LINE' : 'FOOTPATH') +
+                   (tl.path.bridge ? ' BRIDGE' : '') + ' - LEVEL ' + tl.path.level;
+        lines[1] = isConnected(win.tile.x, win.tile.y) ? 'JOINED TO THE WAY IN'
+                                                       : 'NOT JOINED TO THE WAY IN';
+      }
+      for (var i = 0; i < lines.length; i++) {
+        text(g, lines[i], win.x + 5, win.y + 17 + i * 10, i ? PAL.uiDim : PAL.uiText);
+      }
+    }
+  });
 }
 
-function drawHelpWindow(g) {
-  var win = ui.helpWin;
-  if (!win) return;
+function openParkWin() {
+  openWin({
+    id: 'park', title: 'THE PARK', w: 168, h: 13 + 62,
+    draw: function (g, win) {
+      var rows = [
+        ['CASH', money(park.cash)],
+        ['LAND', park.owned + ' TILES'],
+        ['GUESTS', String(park.guests)],
+        ['RATING', park.rating + ' OF 999'],
+        ['ENTRY', money(park.entryFee)],
+        ['DATE', MONTHS[park.month] + ' YEAR ' + park.year]
+      ];
+      for (var i = 0; i < rows.length; i++) {
+        var y = win.y + 17 + i * 10;
+        text(g, rows[i][0], win.x + 5, y, PAL.uiDim);
+        text(g, rows[i][1], win.x + 50, y, PAL.uiText);
+      }
+    }
+  });
+}
+
+function openHelpWin() {
   var lines = [
     'DRAG       PAN THE PARK',
     'PINCH      ZOOM IN AND OUT',
     'RO         TURN THE VIEW',
     'LNK        SHOW WHAT CONNECTS',
+    'TAP A TILE TO INSPECT IT.',
     '',
     'PICK A TOOL AND THE VIEW GETS A',
     'COLOURED BORDER. THEN ONE FINGER',
     'DRAWS AND TWO FINGERS PAN.',
     'PATHS STEP UP AND DOWN A LEVEL',
-    'AND BRIDGE STRAIGHT OVER WATER.'
+    'AND BRIDGE STRAIGHT OVER WATER.',
+    '',
+    'WINDOWS DRAG BY THEIR TITLE BAR.'
   ];
-  windowFrame(g, win.x, win.y, win.w, win.h, 'HOW TO PLAY');
-  for (var i = 0; i < lines.length; i++) {
-    text(g, lines[i], win.x + 6, win.y + 17 + i * 10, PAL.uiText);
-  }
+  openWin({
+    id: 'help', title: 'HOW TO PLAY', w: Math.min(uiW - 16, 218), h: 13 + lines.length * 10 + 5,
+    draw: function (g, win) {
+      for (var i = 0; i < lines.length; i++) {
+        text(g, lines[i], win.x + 6, win.y + 17 + i * 10, PAL.uiText);
+      }
+    }
+  });
 }
 
 function drawToast(g) {
@@ -1643,7 +1806,7 @@ function drawToast(g) {
 function drawStatusBar(g) {
   panel(g, 0, 0, uiW, 15);
   text(g, park.name, 5, 4, PAL.uiText);
-  var items = [money(park.cash), 'LAND ' + park.owned,
+  var items = [money(park.cash), 'GUESTS ' + park.guests, 'RATING ' + park.rating,
                MONTHS[park.month] + ' YEAR ' + park.year];
   var nameW = textW(park.name);
   function itemsW() {
@@ -1682,18 +1845,35 @@ function drawArmedChrome(g) {
   g.fillRect(uiW - 2, 15, 2, uiH - 15);
 
   var label = build.tool.hint;
-  var line = build.stroke && build.stroke.tiles
-    ? label + '  ' + build.stroke.tiles.length + ' TILES  ' + money(build.cost)
+  var st = build.stroke;
+  var line = st && st.tiles
+    ? label + '  ' + (st.nOk || 0) + ' OF ' + st.tiles.length + ' TILES  ' + money(build.cost)
     : label + '  1 FINGER DRAWS - 2 PANS';
   var w = Math.min(uiW - 62, textW(line) + 12);
   panel(g, 2, 17, w, 15);
   g.fillStyle = c;
   g.fillRect(2, 17, 3, 15);
   text(g, line, 8, 21, PAL.uiText);
-  if (build.stroke && build.why) {
-    var ww = Math.min(uiW - 8, textW(build.why) + 12);
+
+  if (st && build.problem) {
+    var p = build.problem;
+    // money trouble is red, a bad spot is amber, skipped tiles are just a note
+    var ink = p.kind === 'money' ? '#7a1f18' : p.kind === 'place' ? '#7a4a10' : PAL.uiDim;
+    var head = p.kind === 'money' ? 'CANNOT AFFORD IT: '
+             : p.kind === 'place' ? 'CANNOT BUILD THERE: ' : '';
+    var msg = head + p.text;
+    var ww = Math.min(uiW - 8, textW(msg) + 12);
     panel(g, 2, 34, ww, 14);
-    text(g, build.why, 8, 38, '#7a1f18');
+    text(g, msg, 8, 38, ink);
+  }
+
+  // the running bill sits by your finger, where you are actually looking
+  if (st && st.px !== undefined && st.tiles) {
+    var chip = (st.nOk || 0) + ' TILES  ' + money(build.cost);
+    var cw = textW(chip) + 10, chx = clamp(Math.round(st.px - cw / 2), 2, uiW - cw - 2);
+    var chy = clamp(Math.round(st.py - 26), 34, uiH - 20);
+    panel(g, chx, chy, cw, 14);
+    text(g, chip, chx + 5, chy + 4, build.ok ? PAL.uiText : '#7a1f18');
   }
 }
 
@@ -1704,10 +1884,9 @@ function drawUI(g) {
     for (var b = 0; b < buttons.length; b++) drawButton(g, buttons[b]);
     return;
   }
+  for (var wi = 0; wi < wins.length; wi++) drawWin(g, wins[wi]);
   drawStatusBar(g);
   drawArmedChrome(g);
-  if (!armed()) drawInfoWindow(g);
-  if (ui.showHelp) drawHelpWindow(g);
 
   if (ui.toolBar) panel(g, ui.toolBar.x, ui.toolBar.y, ui.toolBar.w, ui.toolBar.h);
   if (ui.catBar) panel(g, ui.catBar.x, ui.catBar.y, ui.catBar.w, ui.catBar.h);
@@ -1774,13 +1953,20 @@ function onDown(e) {
   if (pointers.size === 1) {
     var u = toUI(e);
     var hit = hitButton(u.x, u.y);
+    var bar = hit ? null : winTitleAt(u.x, u.y);
     if (hit) { hit.pressed = true; pointers.get(e.pointerId).btn = hit; }
+    else if (bar) {
+      frontWin(bar.id);
+      pointers.get(e.pointerId).winDrag = { id: bar.id, dx: u.x - bar.x, dy: u.y - bar.y };
+      layoutUI();
+    }
     else if (armed()) {
       // armed: one finger draws rather than pans
       var tl = pickTile(b.x, b.y);
-      if (tl) {
+      if (tl && !winAt(u.x, u.y)) {
         pointers.get(e.pointerId).drawing = true;
-        build.stroke = { from: tl, to: tl, plans: null };
+        var pu = toUI(e);
+        build.stroke = { from: tl, to: tl, plans: null, px: pu.x, py: pu.y };
         planStroke();
       }
     }
@@ -1843,7 +2029,21 @@ function onMove(e) {
     return;
   }
 
+  if (p.winDrag) {
+    var w = findWin(p.winDrag.id);
+    if (w && !narrowLayout()) {
+      var u2 = toUI(e);
+      w.x = Math.round(u2.x - p.winDrag.dx);
+      w.y = Math.round(u2.y - p.winDrag.dy);
+      layoutUI();
+    }
+    e.preventDefault();
+    return;
+  }
+
   if (p.drawing && build.stroke) {
+    var pu2 = toUI(e);
+    build.stroke.px = pu2.x; build.stroke.py = pu2.y;
     var tl = pickTile(toBuf(e).x, toBuf(e).y);
     if (tl && (tl.x !== build.stroke.to.x || tl.y !== build.stroke.to.y)) {
       build.stroke.to = tl;
@@ -1875,12 +2075,13 @@ function onUp(e) {
     e.preventDefault();
     return;
   }
+  if (p.winDrag) { layoutUI(); e.preventDefault(); return; }
   if (p.drawing) {                            // a tap while armed is a one-tile stroke
     commitStroke();
     e.preventDefault();
     return;
   }
-  if (!p.moved && performance.now() - p.t < TAP_MS) tap(toBuf(e));
+  if (!p.moved && performance.now() - p.t < TAP_MS) tap(toBuf(e), toUI(e));
   e.preventDefault();
 }
 
@@ -1892,11 +2093,13 @@ function onCancel(e) {
   if (pointers.size < 2) pinch = null;
 }
 
-function tap(b) {
+function tap(b, uiPt) {
   if (ui.notice || armed()) return;
+  if (uiPt && winAt(uiPt.x, uiPt.y)) return;
   var t = pickTile(b.x, b.y);
   ui.selected = t;
-  if (!t) toast('THAT IS OFF THE MAP');
+  if (!t) { toast('THAT IS OFF THE MAP'); return; }
+  openTileWin(t);
 }
 
 disp.addEventListener('pointerdown', onDown, { passive: false });
@@ -1914,7 +2117,7 @@ var keys = {};
 window.addEventListener('keydown', function (e) {
   keys[e.key] = true;
   if (e.key === 'r' || e.key === 'R') rotate(1);
-  if (e.key === '?' || e.key === '/') { ui.showHelp = !ui.showHelp; layoutUI(); }
+  if (e.key === '?' || e.key === '/') toggleWin('help', openHelpWin);
   if (e.key === '+' || e.key === '=') setZoom(zoomIdx + 1);
   if (e.key === '-' || e.key === '_') setZoom(zoomIdx - 1);
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].indexOf(e.key) >= 0) e.preventDefault();
