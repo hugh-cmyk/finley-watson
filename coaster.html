@@ -118,7 +118,7 @@ var MAX_DT  = 0.1;     // clamp so a backgrounded tab doesn't fast-forward
 var SAVE_KEY = 'finley-coaster-park', BEST_KEY = 'finley-coaster-best';
 var ARCHIVE_KEY = 'finley-coaster-park-v1-archive';
 var NOTICE_KEY = 'finley-coaster-v1-notice-seen';
-var SAVE_VERSION = 3;   // 1 was the single-coaster game, 2 had no paths
+var SAVE_VERSION = 4;   // 1 single-coaster game, 2 no paths, 3 no rides
 
 var PAL = {
   vd:     '#16202a',   // void beyond the world
@@ -142,6 +142,7 @@ var PAL = {
   wood:   '#8b5a2b', woodD: '#5f3d1d', rail: '#9c9c9c',
   railL:  '#c0c0c0', railD: '#6e6e6e', tie: '#7a5230', tieD: '#4e3320',
   post:   '#6b5136', postD: '#4a3823',
+  plat:   '#9a9a94', platD: '#6c6c67', chain: '#3f3f3f', brake: '#a83232',
   fence:  '#a08050', fenceD: '#6b5232',
   sign:   '#efeada', signD: '#8d8674', signPost: '#6b5136',
   ghostOK: '#3fd94e', ghostNo: '#e04030',
@@ -320,7 +321,7 @@ function diamondSpan(row) {                 // → [x0, width] for row 0..15
   return [14 - r * 2, 4 + r * 4];
 }
 
-var SPR = { grass: {}, sand: {}, water: {}, path: {}, face: {}, fence: {}, tree: [], deco: {} };
+var SPR = { grass: {}, sand: {}, water: {}, path: {}, face: {}, fence: {}, tree: [], deco: {}, track: {} };
 
 function tone3(hex, out, f) {
   var c = shadeHex(hex, f);
@@ -574,6 +575,99 @@ function rampSprite(kind, mask, dir) {
   return SPR.path[key];
 }
 
+/* Track artwork. Each (piece, on-screen direction) is rasterised once by
+   walking its path and plotting rails, sleepers and trimmings; tinted copies
+   double as the build ghost. Ported unchanged apart from the piece set key. */
+var RAILSEP = 0.19;
+
+function trackSprite(setId, type, sdir, tint) {
+  var key = setId + '|' + type + '|' + sdir + '|' + (tint || '');
+  if (SPR.track[key]) return SPR.track[key];
+
+  var def = PIECE_SETS[setId][type], f = pathFn(def);
+  var STEPS = Math.max(48, Math.round(24 * (def.tiles + 1)));
+  var ops = [];
+  var tintDark = tint ? shadeHex(tint, 0.55) : null;
+  function plot(x, y, col, isRail) {
+    ops.push([Math.round(x), Math.round(y), tint ? (isRail ? tint : tintDark) : col]);
+  }
+  function proj(u, v, w) { return { x: (u - v) * HW, y: (u + v) * HH - w * ZH }; }
+
+  var samples = [], i;
+  for (i = 0; i <= STEPS; i++) {
+    var t = i / STEPS, p = f(t);
+    var q = rotUV(p.u, p.v, sdir);
+    var pa = f(Math.max(0, t - 0.004)), pb = f(Math.min(1, t + 0.004));
+    var qa = rotUV(pa.u, pa.v, sdir), qb = rotUV(pb.u, pb.v, sdir);
+    var du = qb.u - qa.u, dv = qb.v - qa.v, m = Math.hypot(du, dv) || 1;
+    samples.push({ u: q.u, v: q.v, w: p.w, nu: -dv / m, nv: du / m });
+  }
+
+  if (type === 'station') {                    // platform slabs under the rails
+    for (i = 0; i <= STEPS; i++) {
+      var sm0 = samples[i];
+      for (var side0 = -1; side0 <= 1; side0 += 2) {
+        for (var o = 0.30; o <= 0.62; o += 0.06) {
+          var pp = proj(sm0.u + sm0.nu * side0 * o, sm0.v + sm0.nv * side0 * o, sm0.w);
+          plot(pp.x, pp.y + 1, PAL.platD, false);
+          plot(pp.x, pp.y, PAL.plat, false);
+        }
+      }
+    }
+  }
+
+  for (i = 0; i <= STEPS; i += 3) {            // sleepers
+    var sm = samples[i];
+    for (var k = -1; k <= 1; k += 0.25) {
+      var sp = proj(sm.u + sm.nu * RAILSEP * k, sm.v + sm.nv * RAILSEP * k, sm.w);
+      plot(sp.x, sp.y + 1, PAL.tieD, false);
+      plot(sp.x, sp.y, PAL.tie, false);
+    }
+  }
+
+  for (i = 0; i <= STEPS; i++) {               // rails
+    var r = samples[i];
+    for (var side = -1; side <= 1; side += 2) {
+      var rp = proj(r.u + r.nu * RAILSEP * side, r.v + r.nv * RAILSEP * side, r.w);
+      plot(rp.x, rp.y + 1, PAL.railD, false);
+      plot(rp.x, rp.y, side < 0 ? PAL.railL : PAL.rail, true);
+    }
+  }
+
+  if (def.chain) {                             // chain dogs down the middle
+    for (i = 0; i <= STEPS; i += 4) {
+      var cp = proj(samples[i].u, samples[i].v, samples[i].w);
+      plot(cp.x, cp.y, PAL.chain, false);
+    }
+  }
+  if (def.brake) {                             // brake fins across it
+    for (i = 6; i <= STEPS - 6; i += 8) {
+      var bs = samples[i];
+      for (k = -1; k <= 1; k += 0.5) {
+        var bp = proj(bs.u + bs.nu * RAILSEP * k, bs.v + bs.nv * RAILSEP * k, bs.w);
+        plot(bp.x, bp.y - 1, PAL.brake, false);
+        plot(bp.x, bp.y - 2, PAL.brake, false);
+      }
+    }
+  }
+
+  var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+  for (i = 0; i < ops.length; i++) {
+    if (ops[i][0] < minX) minX = ops[i][0];
+    if (ops[i][0] > maxX) maxX = ops[i][0];
+    if (ops[i][1] < minY) minY = ops[i][1];
+    if (ops[i][1] > maxY) maxY = ops[i][1];
+  }
+  var t2 = newCanvas(maxX - minX + 2, maxY - minY + 2), g = t2.g;
+  for (i = 0; i < ops.length; i++) {
+    g.fillStyle = ops[i][2];
+    g.fillRect(ops[i][0] - minX, ops[i][1] - minY, 1, 1);
+  }
+  var spr = { c: t2.c, ox: minX, oy: minY };
+  SPR.track[key] = spr;
+  return spr;
+}
+
 function makeSign() {
   var t = newCanvas(12, 16), g = t.g;
   g.fillStyle = PAL.signPost; g.fillRect(5, 8, 2, 8);
@@ -582,6 +676,19 @@ function makeSign() {
   g.fillStyle = PAL.signD;
   g.fillRect(3, 5, 6, 1);
   g.fillRect(3, 7, 4, 1);
+  return t.c;
+}
+
+/* A little kiosk for the way on and the way off a ride. */
+function makeDoor(colour) {
+  var t = newCanvas(22, 22), g = t.g;
+  g.fillStyle = PAL.platD; g.fillRect(3, 10, 16, 10);
+  g.fillStyle = PAL.plat;  g.fillRect(3, 10, 16, 2);
+  g.fillStyle = colour;    g.fillRect(2, 5, 18, 6);
+  g.fillStyle = shadeHex(colour, 0.7); g.fillRect(2, 11, 18, 1);
+  g.fillStyle = '#2b2b2b'; g.fillRect(9, 13, 5, 7);
+  g.fillStyle = PAL.gold;
+  for (var x = 4; x < 19; x += 4) g.fillRect(x, 7, 2, 2);
   return t.c;
 }
 
@@ -653,6 +760,8 @@ function buildSprites() {
   SPR.tree.push(makeTree(0, 11), makeTree(1, 29), makeTree(2, 47), makeTree(0, 83));
   SPR.deco.entrance = makeEntrance();
   SPR.deco.sign = makeSign();
+  SPR.deco.rideIn = makeDoor('#2f8f3a');
+  SPR.deco.rideOut = makeDoor('#a83232');
   for (var i = 0; i < 4; i++) fenceSprite(i);
 }
 
@@ -1069,7 +1178,14 @@ function categoryOptions(cat) {
 
 /* The build-mode state machine. One armed tool at a time; a stroke is a drag
    in progress. Ride construction reuses this in phase 4. */
-var build = { tool: null, cat: null, stroke: null, cost: 0, ok: false };
+var build = {
+  tool: null, cat: null, stroke: null, cost: 0, ok: false,
+  mode: null,        // null | 'station' | 'track' | 'entrance' | 'exit'
+  ride: null,        // the ride being built
+  rideType: null,    // the type chosen, while siting a station
+  station: null,     // { x, y, d } under the finger
+  piece: 'straight'  // selected piece
+};
 function armed() { return !!build.tool; }
 function armTool(id) {
   build.tool = TOOLS[id] || null;
@@ -1109,6 +1225,300 @@ function rideType(id) {
 
 var rides = [];          // { id, name, typeId, pieces[], entranceTile, exitTile, ... }
 var nextRideId = 1;
+
+/* ── piece sets ─────────────────────────────────────────────────────────
+   Ported from the single-coaster game unchanged in shape: every piece is
+   entry direction and height in, exit direction and height out, plus the
+   numbers the physics wants. Moved out of a global into a table keyed by
+   piece set, so a flume's channel pieces are a sibling entry rather than a
+   branch in the builder. */
+var PIECE_SETS = {
+  coaster: {
+    station:  { name: 'STATION',       cost: 0,   tiles: 4, dz: 0,  slope: 0, chain: true },
+    straight: { name: 'STRAIGHT',      cost: 30,  tiles: 1, dz: 0,  slope: 0 },
+    curveL:   { name: 'CURVE LEFT',    cost: 45,  tiles: 1, dz: 0,  slope: 0, turn: -1 },
+    curveR:   { name: 'CURVE RIGHT',   cost: 45,  tiles: 1, dz: 0,  slope: 0, turn: 1 },
+    gentleUp: { name: 'GENTLE UP',     cost: 45,  tiles: 1, dz: 1,  slope: 1 },
+    gentleDn: { name: 'GENTLE DOWN',   cost: 40,  tiles: 1, dz: -1, slope: -1 },
+    steepUp:  { name: 'STEEP UP',      cost: 65,  tiles: 1, dz: 2,  slope: 2 },
+    steepDn:  { name: 'STEEP DOWN',    cost: 55,  tiles: 1, dz: -2, slope: -2 },
+    lift:     { name: 'CHAIN LIFT',    cost: 75,  tiles: 1, dz: 1,  slope: 1, chain: true },
+    brake:    { name: 'BRAKES',        cost: 50,  tiles: 1, dz: 0,  slope: 0, brake: true },
+    loop:     { name: 'VERTICAL LOOP', cost: 280, tiles: 2, dz: 0,  slope: 0, loop: true,
+                inversion: true, top: 3.2 }
+  }
+};
+var PIECE_PALETTES = {
+  coaster: ['straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
+            'steepUp', 'steepDn', 'lift', 'brake', 'loop']
+};
+function pieceSet(ride) { return PIECE_SETS[rideType(ride.typeId).pieceSet]; }
+function pieceDef(ride, id) { return pieceSet(ride)[id]; }
+
+/* Piece shape. t runs 0..1 from the entry edge to the exit edge. Unchanged
+   from the original beyond taking the definition instead of a global id. */
+function pathFn(def) {
+  if (def.turn) {
+    var s = def.turn;
+    return function (t) {
+      var a = t * Math.PI / 2;
+      return { u: -0.5 + 0.5 * Math.sin(a), v: s * (0.5 - 0.5 * Math.cos(a)), w: 0 };
+    };
+  }
+  if (def.loop) {
+    // A circle in the u-w plane with a forward drift, so it comes out ahead of
+    // where it went in instead of biting its own tail.
+    return function (t) {
+      if (t < 0.15) return { u: -0.5 + (t / 0.15) * 0.5, v: 0, w: 0 };
+      if (t > 0.85) return { u: 1 + ((t - 0.85) / 0.15) * 0.5, v: 0, w: 0 };
+      var phi = (t - 0.15) / 0.7 * Math.PI * 2;
+      return { u: phi / (Math.PI * 2) + 0.45 * Math.sin(phi), v: 0,
+               w: 1.6 * (1 - Math.cos(phi)) };
+    };
+  }
+  return function (t) {
+    return { u: -0.5 + t * def.tiles, v: 0, w: def.dz * t };
+  };
+}
+
+function rotUV(u, v, k) {                      // 90 degree steps in the ground plane
+  for (var i = 0; i < k; i++) { var t = u; u = -v; v = t; }
+  return { u: u, v: v };
+}
+
+function pieceExit(def, x, y, z, d) {
+  if (def.turn) {
+    var nd = (d + def.turn + 4) % 4;
+    return { x: x + DX[nd], y: y + DY[nd], z: z + def.dz, d: nd };
+  }
+  return { x: x + DX[d] * def.tiles, y: y + DY[d] * def.tiles, z: z + def.dz, d: d };
+}
+
+/* Cells the piece sits in, with the height band it needs there. */
+function pieceCells(def, x, y, z, d) {
+  var cells = [];
+  if (def.turn) return [{ x: x, y: y, z0: z, z1: z }];
+  for (var i = 0; i < def.tiles; i++) {
+    var za = z + def.dz * (i / def.tiles), zb = z + def.dz * ((i + 1) / def.tiles);
+    cells.push({
+      x: x + DX[d] * i, y: y + DY[d] * i,
+      z0: Math.min(za, zb), z1: def.top ? z + def.top : Math.max(za, zb)
+    });
+  }
+  return cells;
+}
+
+function lastSlope(ride) {
+  var p = ride.pieces[ride.pieces.length - 1];
+  return p ? (pieceDef(ride, p.type).slope || 0) : 0;
+}
+
+/* The chain closes when the piece's exit lines up exactly with the station's
+   entry - same tile, same height, same direction. */
+function closesCircuit(ride, id) {
+  var c = ride.cursor, s = ride.station;
+  var ex = pieceExit(pieceDef(ride, id), c.x, c.y, c.z, c.d);
+  return ex.x === s.x && ex.y === s.y && ex.z === s.z && ex.d === s.d;
+}
+
+/* Can this piece go on the end of the chain? Returns a reason so the palette
+   can grey itself out and say why. */
+function checkPiece(ride, id) {
+  if (ride.complete) return 'CIRCUIT IS FINISHED';
+  var def = pieceDef(ride, id), c = ride.cursor;
+  if (def.cost > park.cash) return 'NOT ENOUGH MONEY';
+  if (Math.abs((def.slope || 0) - lastSlope(ride)) > 1) return 'SLOPE CHANGES TOO FAST';
+
+  var cells = pieceCells(def, c.x, c.y, c.z, c.d);
+  for (var i = 0; i < cells.length; i++) {
+    var cell = cells[i];
+    var t = tileAt(cell.x, cell.y);
+    if (!t) return 'OFF THE EDGE OF THE MAP';
+    if (!t.owned) return 'YOU DO NOT OWN THAT LAND';
+    if (cell.z0 < t.h) return 'THAT GOES UNDERGROUND';
+    if (isWater(t) && cell.z0 < t.water) return 'THAT IS UNDER THE WATER';
+    if (t.path && cell.z0 < t.path.level + 1) return 'A PATH IS IN THE WAY';
+    if (cell.z1 > MAX_Z + 4) return 'TOO HIGH FOR THE PARK';
+  }
+  var ex = pieceExit(def, c.x, c.y, c.z, c.d);
+  var et = tileAt(ex.x, ex.y);
+  if (!et) return 'OFF THE EDGE OF THE MAP';
+
+  var s = ride.station;
+  if (ex.x === s.x && ex.y === s.y) {
+    if (ex.z !== s.z || ex.d !== s.d) {
+      if (Math.abs(ex.z - s.z) <= 2) return 'RIGHT SPOT, WRONG HEIGHT OR WAY ROUND';
+    } else if ((def.slope || 0) !== 0) {
+      return 'COME INTO THE STATION ON THE FLAT';
+    }
+  }
+
+  // Overlaps: track may cross itself, but only with two levels of clearance.
+  // Another ride's track is never crossable at all.
+  for (var r = 0; r < rides.length; r++) {
+    var other = rides[r], mine = other === ride;
+    for (var p = 0; p < other.pieces.length; p++) {
+      var pc = other.pieces[p].cells;
+      for (var a = 0; a < pc.length; a++) for (var b = 0; b < cells.length; b++) {
+        if (pc[a].x !== cells[b].x || pc[a].y !== cells[b].y) continue;
+        if (!mine) return 'ANOTHER RIDE IS IN THE WAY';
+        if (cells[b].z0 - pc[a].z1 >= 2 || pc[a].z0 - cells[b].z1 >= 2) continue;
+        // landing back on the station entry is how you finish, not a clash
+        if (p === 0 && closesCircuit(ride, id)) continue;
+        return 'SOMETHING IS IN THE WAY';
+      }
+    }
+  }
+  return null;
+}
+
+function addPiece(ride, id, x, y, z, d) {
+  var def = pieceDef(ride, id);
+  var piece = { type: id, x: x, y: y, z: z, d: d, cells: pieceCells(def, x, y, z, d) };
+  ride.pieces.push(piece);
+  for (var i = 0; i < piece.cells.length; i++) {
+    var t = tileAt(piece.cells[i].x, piece.cells[i].y);
+    if (t) t.rideId = ride.id;
+  }
+  return piece;
+}
+
+function placeRidePiece(ride, id) {
+  var why = checkPiece(ride, id);
+  if (why) { toast(why); return false; }
+  var c = ride.cursor, def = pieceDef(ride, id);
+  addPiece(ride, id, c.x, c.y, c.z, c.d);
+  park.cash -= def.cost;
+  var closed = closesCircuit(ride, id);
+  ride.cursor = pieceExit(def, c.x, c.y, c.z, c.d);
+  if (closed) {
+    ride.complete = true;
+    toast('CIRCUIT COMPLETE - NOW ADD A WAY IN AND OUT');
+    build.mode = 'entrance';
+  }
+  layoutUI();
+  saveGame();
+  return true;
+}
+
+function undoRidePiece(ride) {
+  if (ride.pieces.length <= 1) { toast('THE STATION STAYS PUT'); return; }
+  var piece = ride.pieces.pop();
+  park.cash += pieceDef(ride, piece.type).cost;
+  ride.cursor = { x: piece.x, y: piece.y, z: piece.z, d: piece.d };
+  ride.complete = false;
+  reclaimTiles(ride);
+  if (build.mode === 'entrance' || build.mode === 'exit') build.mode = 'track';
+  layoutUI();
+}
+
+/* Tile ownership by ride is rebuilt from the pieces, so undo cannot leave a
+   tile claimed by track that is no longer there. */
+function reclaimTiles(ride) {
+  for (var i = 0; i < world.tiles.length; i++) {
+    if (world.tiles[i].rideId === ride.id) world.tiles[i].rideId = null;
+  }
+  for (var p = 0; p < ride.pieces.length; p++) {
+    var cells = ride.pieces[p].cells;
+    for (var c = 0; c < cells.length; c++) {
+      var t = tileAt(cells[c].x, cells[c].y);
+      if (t) t.rideId = ride.id;
+    }
+  }
+  if (ride.entranceTile) { var e = tileAt(ride.entranceTile.x, ride.entranceTile.y); if (e) e.rideId = ride.id; }
+  if (ride.exitTile) { var x2 = tileAt(ride.exitTile.x, ride.exitTile.y); if (x2) x2.rideId = ride.id; }
+}
+
+function rideById(id) {
+  for (var i = 0; i < rides.length; i++) if (rides[i].id === id) return rides[i];
+  return null;
+}
+
+/* A station is four tiles of level ground you own, clear of everything. */
+function stationPlan(typeId, x, y, d) {
+  var type = rideType(typeId);
+  var def = PIECE_SETS[type.pieceSet].station;
+  var cells = [], z = null;
+  for (var i = 0; i < def.tiles; i++) {
+    var cx = x + DX[d] * i, cy = y + DY[d] * i;
+    var t = tileAt(cx, cy);
+    if (!t) return { ok: false, why: 'OFF THE EDGE OF THE MAP' };
+    if (!t.owned) return { ok: false, why: 'YOU DO NOT OWN THAT LAND' };
+    if (isWater(t)) return { ok: false, why: 'NOT IN THE WATER' };
+    if (t.path) return { ok: false, why: 'THERE IS A PATH THERE' };
+    if (t.rideId !== null) return { ok: false, why: 'ANOTHER RIDE IS THERE' };
+    if (t.object && t.object.type !== 'tree') return { ok: false, why: 'SOMETHING IS IN THE WAY' };
+    if (z === null) z = t.h;
+    else if (t.h !== z) return { ok: false, why: 'THE GROUND IS NOT LEVEL' };
+    cells.push({ x: cx, y: cy });
+  }
+  return { ok: true, z: z, cells: cells, cost: type.baseCost };
+}
+
+function createRide(typeId, x, y, d) {
+  var plan = stationPlan(typeId, x, y, d);
+  if (!plan.ok) { toast(plan.why); return null; }
+  if (park.cash < plan.cost) { toast('CANNOT AFFORD IT: SHORT BY ' + money(plan.cost - park.cash)); return null; }
+  var type = rideType(typeId);
+  var n = 1;
+  for (var i = 0; i < rides.length; i++) if (rides[i].typeId === typeId) n++;
+  var ride = {
+    id: nextRideId++,
+    name: 'THRILLSBURY ' + type.name.split(' ').pop() + ' ' + n,
+    typeId: typeId,
+    pieces: [],
+    station: { x: x, y: y, z: plan.z, d: d },
+    cursor: null,
+    complete: false,
+    entranceTile: null, exitTile: null,
+    status: 'building',
+    ratings: { excitement: 0, intensity: 0, nausea: 0 },
+    ticketPrice: 2,
+    queue: [], vehicles: [], stats: {}
+  };
+  rides.push(ride);
+  for (var c = 0; c < plan.cells.length; c++) {
+    var t = tileAt(plan.cells[c].x, plan.cells[c].y);
+    if (t.object && t.object.type === 'tree') t.object = null;
+  }
+  addPiece(ride, 'station', x, y, plan.z, d);
+  ride.cursor = pieceExit(pieceDef(ride, 'station'), x, y, plan.z, d);
+  park.cash -= plan.cost;
+  toast(ride.name + ' STARTED');
+  return ride;
+}
+
+/* The way on and the way off: one tile each, next to the station, on a tile
+   you own and can reach on foot. */
+function stationSideTiles(ride) {
+  var out = [], seen = {};
+  var def = pieceDef(ride, 'station');
+  for (var i = 0; i < def.tiles; i++) {
+    var sx = ride.station.x + DX[ride.station.d] * i;
+    var sy = ride.station.y + DY[ride.station.d] * i;
+    for (var d = 0; d < 4; d++) {
+      var nx = sx + DX[d], ny = sy + DY[d];
+      var key = nx + ',' + ny;
+      if (seen[key]) continue;
+      seen[key] = 1;
+      var t = tileAt(nx, ny);
+      if (!t || t.rideId !== null) continue;
+      out.push({ x: nx, y: ny });
+    }
+  }
+  return out;
+}
+function doorPlan(ride, x, y) {
+  var t = tileAt(x, y);
+  if (!t) return { ok: false, why: 'OFF THE EDGE OF THE MAP' };
+  if (!t.owned) return { ok: false, why: 'YOU DO NOT OWN THAT LAND' };
+  if (isWater(t)) return { ok: false, why: 'NOT IN THE WATER' };
+  if (t.rideId !== null) return { ok: false, why: 'SOMETHING IS THERE ALREADY' };
+  var next = false, sides = stationSideTiles(ride);
+  for (var i = 0; i < sides.length; i++) if (sides[i].x === x && sides[i].y === y) next = true;
+  if (!next) return { ok: false, why: 'IT MUST TOUCH THE STATION' };
+  return { ok: true, cost: 0 };
+}
 
 /* ═══════════════════════════ park ═══════════════════════════ */
 
@@ -1300,6 +1710,7 @@ function drawButton(g, b) {
   bevel(g, b.x, b.y, b.w, b.h, sunk);
   var ox = down ? 1 : 0;
   var ink = b.disabled ? '#7d7d7d' : PAL.uiText;
+  if (b.piece) drawPieceIcon(g, b.piece, b.x + ox, b.y + ox, ink);
   if (b.label) {
     var tw = textW(b.label);
     text(g, b.label, b.x + ((b.w - tw) >> 1) + ox, b.y + ((b.h - GH) >> 1) + ox, ink);
@@ -1344,6 +1755,18 @@ var wins = [];                      // open windows, front-most last
 /* Measured in real screen width, not UI pixels: what matters is whether a
    person has room for two windows side by side. */
 function narrowLayout() { return (disp.width / dpr) < 520; }
+
+function openWinRaw(spec) {
+  var win = {};
+  for (var f in spec) win[f] = spec[f];
+  win.x = spec.x === undefined ? 8 : spec.x;
+  win.y = spec.y === undefined ? 40 : spec.y;
+  wins.push(win);
+  return win;
+}
+function closeWinQuiet(id) {
+  for (var i = 0; i < wins.length; i++) if (wins[i].id === id) { wins.splice(i, 1); return; }
+}
 
 function openWin(spec) {
   var existing = findWin(spec.id);
@@ -1466,6 +1889,37 @@ function layoutUI() {
     buttons.push({ id: 'done', x: uiW - 52 - 4, y: 19, w: 52, h: 18, label: 'DONE' });
   }
 
+  // construction window: piece palette, build, undo. Lives in the window
+  // manager, so it drags around like everything else.
+  if (build.mode === 'track' && build.ride) {
+    var bw = findWin('build');
+    if (!bw) {
+      bw = openWinRaw({ id: 'build', title: 'BUILD TRACK', w: 128, h: 114,
+                        x: 8, y: 40, draw: drawBuildWinBody });
+    }
+    var pal = PIECE_PALETTES[rideType(build.ride.typeId).pieceSet];
+    for (var pi = 0; pi < pal.length; pi++) {
+      buttons.push({ id: 'piece_' + pal[pi], piece: pal[pi],
+                     x: bw.x + 5 + (pi % 5) * 24, y: bw.y + 17 + ((pi / 5) | 0) * 20,
+                     w: 22, h: 18,
+                     on: build.piece === pal[pi],
+                     disabled: !!checkPiece(build.ride, pal[pi]) });
+    }
+    buttons.push({ id: 'do_build', x: bw.x + 5, y: bw.y + 71, w: 52, h: 18, label: 'BUILD' });
+    buttons.push({ id: 'do_undo',  x: bw.x + 61, y: bw.y + 71, w: 40, h: 18, label: 'UNDO' });
+  } else if (findWin('build')) {
+    closeWinQuiet('build');
+  }
+
+  // siting a station, or hanging a door on one
+  if (build.mode === 'station') {
+    buttons.push({ id: 'st_turn',   x: uiW - 170, y: 19, w: 46, h: 18, label: 'TURN' });
+    buttons.push({ id: 'st_place',  x: uiW - 120, y: 19, w: 52, h: 18, label: 'PLACE' });
+    buttons.push({ id: 'st_cancel', x: uiW - 64,  y: 19, w: 60, h: 18, label: 'CANCEL' });
+  } else if (build.mode === 'entrance' || build.mode === 'exit') {
+    buttons.push({ id: 'door_skip', x: uiW - 64, y: 19, w: 60, h: 18, label: 'LATER' });
+  }
+
   placeWins();
   for (var wi = 0; wi < wins.length; wi++) {
     var w = wins[wi];
@@ -1482,8 +1936,20 @@ function pressButton(b) {
     if (!build.cat) disarm(); else layoutUI();
     return;
   }
-  if (b.rideType) {                         // ride construction lands in phase 4
-    toast('RIDE BUILDING COMES NEXT');
+  if (b.rideType) {                         // start siting a station
+    disarm();
+    build.mode = 'station';
+    build.rideType = rideType(b.rideType);
+    build.station = null;
+    build.ride = null;
+    toast('TAP WHERE THE STATION GOES');
+    layoutUI();
+    return;
+  }
+  if (b.piece) {                            // tap a selected piece again to lay it
+    if (build.piece === b.piece && build.ride) placeRidePiece(build.ride, b.piece);
+    else build.piece = b.piece;
+    layoutUI();
     return;
   }
   if (b.tool) {                             // arming and disarming the same way
@@ -1499,6 +1965,30 @@ function pressButton(b) {
     case 'links':   ui.showLinks = !ui.showLinks; layoutUI(); break;
     case 'notice_ok': dismissNotice(); break;
     case 'done':    disarm(); break;
+    case 'do_build': if (build.ride) placeRidePiece(build.ride, build.piece); break;
+    case 'do_undo':  if (build.ride) undoRidePiece(build.ride); break;
+    case 'st_turn':
+      if (build.station) build.station.d = (build.station.d + 1) % 4;
+      break;
+    case 'st_place':
+      if (!build.station) { toast('TAP WHERE THE STATION GOES'); break; }
+      var made = createRide(build.rideType.id, build.station.x, build.station.y, build.station.d);
+      if (made) {
+        build.ride = made;
+        build.mode = 'track';
+        build.piece = PIECE_PALETTES[rideType(made.typeId).pieceSet][0];
+        build.station = null;
+      }
+      layoutUI();
+      break;
+    case 'st_cancel':
+      build.mode = null; build.station = null; build.rideType = null;
+      layoutUI();
+      break;
+    case 'door_skip':
+      build.mode = 'track';
+      layoutUI();
+      break;
   }
 }
 
@@ -1521,6 +2011,8 @@ function drawObject(g, obj, sx, sy) {
   switch (obj.type) {
     case 'tree':     img = SPR.tree[obj.v % SPR.tree.length]; break;
     case 'entrance': img = SPR.deco.entrance; break;
+    case 'rideEntrance': img = SPR.deco.rideIn; break;
+    case 'rideExit': img = SPR.deco.rideOut; break;
     default: return;
   }
   g.drawImage(img, Math.round(ax - img.width / 2), Math.round(ay - img.height + 3));
@@ -1607,6 +2099,9 @@ function drawWorld(g) {
         }
       }
 
+      var tk = trackMap[w.x + ',' + w.y];
+      if (tk) for (var ti = 0; ti < tk.length; ti++) drawPiece(g, tk[ti].set, tk[ti].p);
+
       // a faint grid over everything you are allowed to build on
       if (armed() && buildableHere(t)) {
         g.globalAlpha = 0.22;
@@ -1659,6 +2154,69 @@ function drawBridgeSupports(g, t, sx, sy) {
   g.fillRect(sx + 21, sy + 10, 1, deep);
 }
 
+/* Which tile each piece is painted on: the one nearest the camera, so the
+   terrain behind it is already down and the terrain in front still covers it.
+   Ported, but walking every ride rather than a single track. */
+var trackMap = {};
+function buildTrackMap() {
+  trackMap = {};
+  for (var r = 0; r < rides.length; r++) {
+    var ride = rides[r], setId = rideType(ride.typeId).pieceSet;
+    for (var i = 0; i < ride.pieces.length; i++) {
+      var p = ride.pieces[i], best = null, bestD = -1e9;
+      for (var c = 0; c < p.cells.length; c++) {
+        var cell = p.cells[c], dd = rotX(cell.x, cell.y) + rotY(cell.x, cell.y);
+        if (dd > bestD) { bestD = dd; best = cell; }
+      }
+      var key = best.x + ',' + best.y;
+      (trackMap[key] || (trackMap[key] = [])).push({ p: p, set: setId });
+    }
+  }
+  for (var k in trackMap) {
+    trackMap[k].sort(function (a, b) { return a.p.z - b.p.z; });
+  }
+}
+
+function drawPiece(g, setId, p, tint, alpha) {
+  var sdir = (p.d - cam.rot + 4) % 4;
+  var spr = trackSprite(setId, p.type, sdir, tint);
+  var rx = rotX(p.x, p.y), ry = rotY(p.x, p.y);
+  var sx = (rx - ry) * HW + cam.x + HW;
+  var sy = (rx + ry) * HH - p.z * ZH + cam.y + HH;
+  if (alpha !== undefined) g.globalAlpha = alpha;
+  drawSupports(g, setId, p, tint);
+  g.drawImage(spr.c, Math.round(sx + spr.ox), Math.round(sy + spr.oy));
+  if (alpha !== undefined) g.globalAlpha = 1;
+}
+
+/* Posts from the track down to whatever is underneath it. Drawn from the
+   piece's height over the terrain rather than baked into the artwork, so a
+   water ride's legs come free. */
+function drawSupports(g, setId, p, tint) {
+  var def = PIECE_SETS[setId][p.type], f = pathFn(def);
+  var right = (p.d + 1) % 4;
+  var n = def.tiles;
+  for (var i = 0; i < n; i++) {
+    var t = (i + 0.5) / n, q = f(t);
+    var wx = p.x + q.u * DX[p.d] + q.v * DX[right];
+    var wy = p.y + q.u * DY[p.d] + q.v * DY[right];
+    var cx = clamp(Math.round(wx), 0, WORLD - 1), cy = clamp(Math.round(wy), 0, WORLD - 1);
+    var tile = world.tiles[idx(cx, cy)];
+    var gh = tile.h;
+    var zz = p.z + q.w;
+    if (zz - gh < 0.4) continue;
+    var rx = rotX(wx, wy), ry = rotY(wx, wy);
+    var sx = Math.round((rx - ry) * HW + cam.x + HW);
+    var top = Math.round((rx + ry) * HH - zz * ZH + cam.y + HH);
+    var foot = Math.round((rx + ry) * HH - gh * ZH + cam.y + HH + 4);
+    if (foot <= top) continue;
+    g.fillStyle = tint || PAL.postD;
+    g.fillRect(sx - 1, top, 3, foot - top);
+    g.fillStyle = tint || PAL.post;
+    g.fillRect(sx - 1, top, 1, foot - top);
+  }
+}
+
 function buildableHere(t) {
   if (!build.tool) return false;
   if (build.tool.kind === 'land') return t.forSale;
@@ -1700,6 +2258,126 @@ function frontier(x, y) {
 
 /* The stroke you are about to commit, tile by tile, green where it will take
    and red where it will not. */
+/* The piece about to be laid, at the end of the chain, green if it fits.
+   Ported from the single-coaster ghost; the station preview is new. */
+function drawTrackGhost(g) {
+  if (build.mode === 'station' && build.station) {
+    var plan = stationPlan(build.rideType.id, build.station.x, build.station.y, build.station.d);
+    var tint = plan.ok ? PAL.ghostOK : PAL.ghostNo;
+    var def = PIECE_SETS[build.rideType.pieceSet].station;
+    for (var i = 0; i < def.tiles; i++) {
+      var cx = build.station.x + DX[build.station.d] * i;
+      var cy = build.station.y + DY[build.station.d] * i;
+      var t = tileAt(cx, cy);
+      if (!t) continue;
+      var rx = rotX(cx, cy), ry = rotY(cx, cy);
+      drawTileOutline(g, (rx - ry) * HW + cam.x,
+                         (rx + ry) * HH - surfaceLevel(t) * ZH + cam.y, tint);
+    }
+    if (plan.ok) {
+      drawPiece(g, build.rideType.pieceSet,
+                { type: 'station', x: build.station.x, y: build.station.y,
+                  z: plan.z, d: build.station.d }, tint, 0.75);
+    }
+    return;
+  }
+
+  var ride = build.ride;
+  if (!ride) return;
+
+  if (build.mode === 'entrance' || build.mode === 'exit') {
+    var sides = stationSideTiles(ride);
+    for (var j = 0; j < sides.length; j++) {
+      var st = tileAt(sides[j].x, sides[j].y);
+      if (!st) continue;
+      var ok = doorPlan(ride, sides[j].x, sides[j].y).ok;
+      var srx = rotX(sides[j].x, sides[j].y), sry = rotY(sides[j].x, sides[j].y);
+      drawTileOutline(g, (srx - sry) * HW + cam.x,
+                         (srx + sry) * HH - surfaceLevel(st) * ZH + cam.y,
+                         ok ? PAL.ghostOK : PAL.ghostNo);
+    }
+    return;
+  }
+
+  if (build.mode !== 'track' || ride.complete) return;
+  var why = checkPiece(ride, build.piece);
+  var tint2 = why ? PAL.ghostNo : PAL.ghostOK;
+  var c = ride.cursor;
+  var cells = pieceCells(pieceDef(ride, build.piece), c.x, c.y, c.z, c.d);
+  for (var k = 0; k < cells.length; k++) {
+    var cell = cells[k], ct = tileAt(cell.x, cell.y);
+    if (!ct) continue;
+    var crx = rotX(cell.x, cell.y), cry = rotY(cell.x, cell.y);
+    drawTileOutline(g, (crx - cry) * HW + cam.x,
+                       (crx + cry) * HH - ct.h * ZH + cam.y, tint2);
+  }
+  drawPiece(g, rideType(ride.typeId).pieceSet,
+            { type: build.piece, x: c.x, y: c.y, z: c.z, d: c.d }, tint2, 0.8);
+}
+
+/* Piece icons: schematic side views, drawn as pixel lines. Ported as-is. */
+function iconLine(g, x0, y0, x1, y1) {
+  var dx = x1 - x0, dy = y1 - y0, n = Math.max(Math.abs(dx), Math.abs(dy));
+  for (var i = 0; i <= n; i++) {
+    g.fillRect(Math.round(x0 + dx * i / n), Math.round(y0 + dy * i / n), 1, 1);
+  }
+}
+function drawPieceIcon(g, type, bx, by, col) {
+  var x = bx + 3, y = by + 4;                 // 16x10 drawing box
+  g.fillStyle = col;
+  switch (type) {
+    case 'straight': iconLine(g, x + 1, y + 6, x + 14, y + 6); break;
+    case 'gentleUp': iconLine(g, x + 1, y + 8, x + 14, y + 3); break;
+    case 'gentleDn': iconLine(g, x + 1, y + 3, x + 14, y + 8); break;
+    case 'steepUp':  iconLine(g, x + 2, y + 9, x + 13, y + 0); break;
+    case 'steepDn':  iconLine(g, x + 2, y + 0, x + 13, y + 9); break;
+    case 'lift':
+      iconLine(g, x + 1, y + 8, x + 14, y + 3);
+      for (var i = 3; i < 14; i += 4) g.fillRect(x + i, y + 6 - ((i - 1) >> 1), 1, 1);
+      break;
+    case 'brake':
+      iconLine(g, x + 1, y + 6, x + 14, y + 6);
+      for (i = 4; i <= 12; i += 4) g.fillRect(x + i, y + 3, 1, 3);
+      break;
+    case 'curveR':
+      iconLine(g, x + 1, y + 2, x + 8, y + 2);
+      iconLine(g, x + 8, y + 2, x + 13, y + 8);
+      g.fillRect(x + 11, y + 8, 4, 2);
+      break;
+    case 'curveL':
+      iconLine(g, x + 1, y + 8, x + 8, y + 8);
+      iconLine(g, x + 8, y + 8, x + 13, y + 2);
+      g.fillRect(x + 11, y + 1, 4, 2);
+      break;
+    case 'loop':
+      for (var a = 0; a < 24; a++) {
+        var th = a / 24 * Math.PI * 2;
+        g.fillRect(Math.round(x + 8 + Math.sin(th) * 4), Math.round(y + 5 - Math.cos(th) * 4.5), 1, 1);
+      }
+      iconLine(g, x + 1, y + 9, x + 5, y + 9);
+      iconLine(g, x + 11, y + 9, x + 15, y + 9);
+      break;
+  }
+}
+
+function drawBuildWinBody(g, win) {
+  var ride = build.ride;
+  if (!ride) return;
+  var def = pieceDef(ride, build.piece);
+  text(g, def.name, win.x + 5, win.y + 59, PAL.uiText);
+  textRight(g, money(def.cost), win.x + win.w - 5, win.y + 59, PAL.uiText);
+
+  var why = checkPiece(ride, build.piece);
+  var line, ink = PAL.uiDim;
+  if (ride.complete) { line = 'CIRCUIT COMPLETE'; ink = '#12401c'; }
+  else if (why) { line = why; ink = why === 'NOT ENOUGH MONEY' ? '#7a1f18' : '#7a4a10'; }
+  else { line = (ride.pieces.length - 1) + ' PIECES - NOT CLOSED YET'; }
+  var lines = wrapText(line, Math.floor((win.w - 10) / ADV));
+  for (var i = 0; i < Math.min(2, lines.length); i++) {
+    text(g, lines[i], win.x + 5, win.y + 93 + i * 9, ink);
+  }
+}
+
 function drawStrokeGhost(g) {
   var st = build.stroke;
   if (!st || !st.plans) return;
@@ -1835,6 +2513,17 @@ function drawNotice(g) {
 /* Being armed has to be obvious at arm's length on a tablet: a coloured
    border round the whole view, a banner saying what one finger will do, and
    the bill for the stroke in progress. */
+function drawModeBanner(g) {
+  if (!build.mode || build.mode === 'track') return;
+  var msg = build.mode === 'station'
+    ? (build.rideType.name + ' - TAP A SPOT, TURN, THEN PLACE')
+    : (build.mode === 'entrance' ? 'TAP A TILE BY THE STATION FOR THE WAY IN'
+                                 : 'NOW TAP ONE FOR THE WAY OUT');
+  var w = Math.min(uiW - 180, textW(msg) + 12);
+  panel(g, 2, 19, w, 15);
+  text(g, msg, 8, 23, PAL.uiText);
+}
+
 function drawArmedChrome(g) {
   if (!armed()) return;
   var c = build.tool.tint;
@@ -1887,6 +2576,7 @@ function drawUI(g) {
   for (var wi = 0; wi < wins.length; wi++) drawWin(g, wins[wi]);
   drawStatusBar(g);
   drawArmedChrome(g);
+  drawModeBanner(g);
 
   if (ui.toolBar) panel(g, ui.toolBar.x, ui.toolBar.y, ui.toolBar.w, ui.toolBar.h);
   if (ui.catBar) panel(g, ui.catBar.x, ui.catBar.y, ui.catBar.w, ui.catBar.h);
@@ -1907,8 +2597,10 @@ function drawUI(g) {
 function render() {
   bctx.fillStyle = PAL.vd;
   bctx.fillRect(0, 0, bufW, bufH);
+  buildTrackMap();
   drawWorld(bctx);
   drawStrokeGhost(bctx);
+  drawTrackGhost(bctx);
 
   uctx.clearRect(0, 0, uiW, uiH);
   drawUI(uctx);
@@ -2094,9 +2786,40 @@ function onCancel(e) {
 }
 
 function tap(b, uiPt) {
-  if (ui.notice || armed()) return;
+  if (ui.notice) return;
   if (uiPt && winAt(uiPt.x, uiPt.y)) return;
   var t = pickTile(b.x, b.y);
+
+  if (build.mode === 'station') {
+    if (!t) { toast('THAT IS OFF THE MAP'); return; }
+    var d = build.station ? build.station.d : (0 - cam.rot + 4) % 4;
+    build.station = { x: t.x, y: t.y, d: d };
+    return;
+  }
+  if ((build.mode === 'entrance' || build.mode === 'exit') && build.ride) {
+    if (!t) return;
+    var plan = doorPlan(build.ride, t.x, t.y);
+    if (!plan.ok) { toast(plan.why); return; }
+    var tile = tileAt(t.x, t.y);
+    tile.rideId = build.ride.id;
+    tile.object = { type: build.mode === 'entrance' ? 'rideEntrance' : 'rideExit',
+                    rideId: build.ride.id };
+    if (build.mode === 'entrance') {
+      build.ride.entranceTile = { x: t.x, y: t.y };
+      build.mode = 'exit';
+      toast('NOW THE WAY OUT');
+    } else {
+      build.ride.exitTile = { x: t.x, y: t.y };
+      build.mode = 'track';
+      build.ride.status = 'closed';
+      toast(build.ride.name + ' IS BUILT');
+    }
+    layoutUI();
+    saveGame();
+    return;
+  }
+
+  if (armed()) return;
   ui.selected = t;
   if (!t) { toast('THAT IS OFF THE MAP'); return; }
   openTileWin(t);
@@ -2147,8 +2870,47 @@ function serialise() {
     entrance: world.entrance,
     park: { cash: park.cash, day: park.day, month: park.month, year: park.year,
             rating: park.rating, entryFee: park.entryFee },
-    rides: [], nextRideId: nextRideId
+    rides: serialiseRides(), nextRideId: nextRideId
   };
+}
+
+function serialiseRides() {
+  var out = [];
+  for (var i = 0; i < rides.length; i++) {
+    var r = rides[i], pieces = [];
+    for (var p = 0; p < r.pieces.length; p++) {
+      var pc = r.pieces[p];
+      pieces.push([pc.type, pc.x, pc.y, pc.z, pc.d]);
+    }
+    out.push({
+      id: r.id, name: r.name, typeId: r.typeId, pieces: pieces,
+      station: r.station, cursor: r.cursor, complete: r.complete,
+      entranceTile: r.entranceTile, exitTile: r.exitTile,
+      status: r.status, ratings: r.ratings, ticketPrice: r.ticketPrice
+    });
+  }
+  return out;
+}
+function restoreRides(saved) {
+  rides = [];
+  for (var i = 0; i < (saved || []).length; i++) {
+    var d = saved[i];
+    var r = {
+      id: d.id, name: d.name, typeId: d.typeId, pieces: [],
+      station: d.station, cursor: d.cursor, complete: !!d.complete,
+      entranceTile: d.entranceTile || null, exitTile: d.exitTile || null,
+      status: d.status || 'closed',
+      ratings: d.ratings || { excitement: 0, intensity: 0, nausea: 0 },
+      ticketPrice: d.ticketPrice === undefined ? 2 : d.ticketPrice,
+      queue: [], vehicles: [], stats: {}
+    };
+    rides.push(r);
+    for (var p = 0; p < d.pieces.length; p++) {
+      var pc = d.pieces[p];
+      addPiece(r, pc[0], pc[1], pc[2], pc[3], pc[4]);
+    }
+    reclaimTiles(r);
+  }
 }
 
 /* One version step per case, falling through to the newest. */
@@ -2160,7 +2922,12 @@ function migrate(save) {
     save.paths = [];
     save.v = 3;
   }
-  // future: if (save.v === 3) { ...upgrade to 4...; save.v = 4; }
+  if (save.v === 3) {                             // 3 → 4: rides arrived
+    save.rides = [];
+    save.nextRideId = 1;
+    save.v = 4;
+  }
+  // future: if (save.v === 4) { ...upgrade to 5...; save.v = 5; }
   if (save.v !== SAVE_VERSION) return null;
   if (save.world !== WORLD) return null;          // world resized under it
   if (!save.h || save.h.length !== WORLD * WORLD) return null;
@@ -2192,6 +2959,7 @@ function applySave(save) {
   park.day = save.park.day; park.month = save.park.month; park.year = save.park.year;
   park.rating = save.park.rating; park.entryFee = save.park.entryFee;
   nextRideId = save.nextRideId || 1;
+  restoreRides(save.rides);
   park.owned = ownedCount();
   pathGraph.dirty = true;
   rebuildPathGraph();
