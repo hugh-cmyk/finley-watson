@@ -1114,21 +1114,53 @@ function reachable(x, y) { return !!approachTile(x, y); }
    so it is not one of them. */
 var LINKED_OBJECTS = { rideEntrance: 1, rideExit: 1, facility: 1 };
 
+/* Could a path be laid here at all, and would laying one here reach the gate?
+   The refusal, the door-placing tint and the hint shown while you are drawing
+   all ask these, so they cannot drift apart the way the old copies did. */
+function freeForPath(t) {
+  return !!t && !t.path && t.rideId === null && t.owned && !isWater(t);
+}
+function wouldJoin(x, y) {
+  for (var e = 0; e < 4; e++) {
+    var mx = x + DX[e], my = y + DY[e];
+    var m = tileAt(mx, my);
+    if (m && m.path && isConnected(mx, my)) return true;
+  }
+  return false;
+}
+
 /* Which free tile beside a door would join it up, so the refusal can name a
-   square to build on rather than only stating what is wrong. */
+   square to build on rather than only stating what is wrong. Reads the door's
+   own four edges, so it holds whichever way the station faces. */
 function joiningTile(tile) {
   if (!tile) return null;
   for (var d = 0; d < 4; d++) {
     var nx = tile.x + DX[d], ny = tile.y + DY[d];
-    var t = tileAt(nx, ny);
-    if (!t || t.path || t.rideId !== null || !t.owned || isWater(t)) continue;
-    for (var e = 0; e < 4; e++) {
-      var mx = nx + DX[e], my = ny + DY[e];
-      var m = tileAt(mx, my);
-      if (m && m.path && isConnected(mx, my)) return { x: nx, y: ny };
-    }
+    if (!freeForPath(tileAt(nx, ny))) continue;
+    if (wouldJoin(nx, ny)) return { x: nx, y: ny };
   }
   return null;
+}
+
+/* Every square that would put a path against an unjoined door, whichever way
+   its station faces. Green if laying there also reaches the gate, amber if it
+   would touch the door but still leave it cut off. */
+function doorHintTiles() {
+  var out = [];
+  for (var i = 0; i < rides.length; i++) {
+    var doors = [rides[i].entranceTile, rides[i].exitTile];
+    for (var k = 0; k < doors.length; k++) {
+      var dt = doors[k];
+      if (!dt || doorReachable(dt)) continue;
+      for (var d = 0; d < 4; d++) {
+        var nx = dt.x + DX[d], ny = dt.y + DY[d];
+        var t = tileAt(nx, ny);
+        if (!freeForPath(t)) continue;
+        out.push({ x: nx, y: ny, tile: t, joins: wouldJoin(nx, ny) });
+      }
+    }
+  }
+  return out;
 }
 
 /* ── placing paths ──────────────────────────────────────────────────────
@@ -3726,6 +3758,21 @@ function frontier(x, y) {
    and red where it will not. */
 /* The piece about to be laid, at the end of the chain, green if it fits.
    Ported from the single-coaster ghost; the station preview is new. */
+/* The moment you need to see where a door wants its path is while you are
+   drawing one, not while placing the door — by then the mistake is already
+   made and looks correct. Shown for every unjoined door on the map. */
+function drawDoorHints(g) {
+  if (!armed() || !build.tool || build.tool.kind !== 'path') return;
+  var hints = doorHintTiles();
+  for (var i = 0; i < hints.length; i++) {
+    var h = hints[i];
+    var rx = rotX(h.x, h.y), ry = rotY(h.x, h.y);
+    drawTileOutline(g, (rx - ry) * HW + cam.x,
+                       (rx + ry) * HH - surfaceLevel(h.tile) * ZH + cam.y,
+                       h.joins ? PAL.ghostOK : PAL.ghostPart);
+  }
+}
+
 function drawTrackGhost(g) {
   if (build.mode === 'station' && build.station) {
     var plan = stationPlan(build.rideType.id, build.station.x, build.station.y, build.station.d);
@@ -4328,6 +4375,7 @@ function render() {
   drawWorld(bctx);
   drawThoughts(bctx);
   drawStrokeGhost(bctx);
+  drawDoorHints(bctx);
   drawTrackGhost(bctx);
 
   uctx.clearRect(0, 0, uiW, uiH);
