@@ -1731,11 +1731,44 @@ function intensityWarning(ride) {
 function rideWinHeight(ride, w) {
   var wrapAt = Math.floor((w - 12) / ADV);
   var fierce = intensityWarning(ride);
+  var dull = appealWarning(ride);
   var why = ride.status !== 'open' ? canOpen(ride) : null;
   var fr = fierce ? Math.min(2, wrapText(fierce, wrapAt).length) : 0;
+  var dr = dull ? Math.min(2, wrapText(dull, wrapAt).length) : 0;
   var wr = why ? Math.min(2, wrapText(why, wrapAt).length) : 0;
-  return 118 + fr * 9 + (fr ? 2 : 0) + wr * 9;
+  return 118 + fr * 9 + (fr ? 2 : 0) + dr * 9 + (dr ? 2 : 0) + wr * 9;
 }
+/* The most any guest could score this ride: the one whose taste fits it
+   exactly, with the strongest stomach and money to spare, arriving at an empty
+   queue. Asked of rideScore itself rather than reimplemented, so the warning
+   cannot drift from the rule it is warning about. */
+function bestPossibleScore(ride, price) {
+  var ideal = {
+    intensityPreference: clamp(ride.ratings.intensity, TOLERANCE.prefFrom, BOLDEST),
+    nauseaTolerance: STRONGEST,
+    money: Infinity,
+    ridden: {}
+  };
+  var probe = {                       // as if it were open and nobody waiting
+    status: 'open', tested: true, queue: [],
+    ratings: ride.ratings, typeId: ride.typeId, entranceTile: ride.entranceTile,
+    ticketPrice: price === undefined ? ride.ticketPrice : price
+  };
+  return rideScore(ideal, probe);
+}
+
+/* A ride can be faultless and still be ignored by everyone, and nothing said
+   so. Distinguish the two cases, because only one of them is fixable by
+   dragging the price down. */
+function appealWarning(ride) {
+  if (!ride.tested) return null;
+  if (!ride.entranceTile || !doorReachable(ride.entranceTile)) return null;  // canOpen says that
+  if (intensityWarning(ride) === 'TOO FIERCE: NOBODY WILL RIDE') return null;
+  if (bestPossibleScore(ride) > WORTH_RIDING) return null;
+  if (bestPossibleScore(ride, 0) > WORTH_RIDING) return 'TOO DULL FOR THE PRICE';
+  return 'TOO DULL: NOBODY WILL RIDE IT';
+}
+
 function rideStatusText(ride) {
   if (sim.active && sim.ride === ride) return 'TESTING';
   if (ride.status === 'open') return 'OPEN';
@@ -2200,9 +2233,14 @@ var NEEDS = {                            // units per second
 /* How fierce a ride a guest will accept. Guest generation, ride choice and the
    warning in the ride window all read these, so a coaster too fierce for
    anybody says so instead of standing there empty with no explanation. */
-var TOLERANCE = { prefFrom: 2, prefSpan: 7, over: 4 };
+var TOLERANCE = { prefFrom: 2, prefSpan: 7, over: 4, tolFrom: 25, tolSpan: 55 };
 var BOLDEST = TOLERANCE.prefFrom + TOLERANCE.prefSpan;   // the bravest guest there is
 var UNRIDEABLE = BOLDEST + TOLERANCE.over;               // above this, nobody at all
+var STRONGEST = TOLERANCE.tolFrom + TOLERANCE.tolSpan;   // the strongest stomach
+
+/* A guest ignores any ride that scores no better than this, so a ride can be
+   open, joined and faultless and still draw nobody. */
+var WORTH_RIDING = 0.4;
 
 function spawnGuest() {
   var rnd = Math.random;
@@ -2214,7 +2252,7 @@ function spawnGuest() {
     energy: 70 + rnd() * 30, hunger: rnd() * 25, thirst: rnd() * 30,
     bladder: rnd() * 20, nausea: 0, wetness: 0,
     money: 12 + rnd() * 40, patience: 40 + rnd() * 60,
-    nauseaTolerance: 25 + rnd() * 55,
+    nauseaTolerance: TOLERANCE.tolFrom + rnd() * TOLERANCE.tolSpan,
     intensityPreference: TOLERANCE.prefFrom + rnd() * TOLERANCE.prefSpan,
     ridden: {}, spent: 0,
     thought: '', thoughtT: 0,
@@ -2297,7 +2335,7 @@ function rideScore(g, ride) {
 }
 
 function bestRide(g) {
-  var best = null, bestScore = 0.4;
+  var best = null, bestScore = WORTH_RIDING;
   for (var i = 0; i < rides.length; i++) {
     var sc = rideScore(g, rides[i]);
     if (sc > bestScore) { bestScore = sc; best = rides[i]; }
@@ -3977,7 +4015,8 @@ function openRatingsWin(ride) {
         'INVERSIONS ' + geo.inversions + '    TURNS ' + geo.turns
       ];
       for (i = 0; i < facts.length; i++) { text(g, facts[i], x, y, PAL.uiText); y += 9; }
-      if (r.ratings.intensity >= 10) text(g, 'TOO INTENSE FOR GUESTS', x, y, '#7a1f18');
+      var warn = intensityWarning(r) || appealWarning(r);
+      if (warn) text(g, warn, x, y, '#7a1f18');
     }
   });
 }
@@ -4084,9 +4123,11 @@ function openRideWin(ride) {
       var r = rideById(win.ride);
       if (!r) return;
       var fierceMsg = intensityWarning(r);
+      var dullMsg = appealWarning(r);
       var whyMsg = r.status !== 'open' ? canOpen(r) : null;
       var wrapAt = Math.floor((win.w - 12) / ADV);
       var fierceRows = fierceMsg ? Math.min(2, wrapText(fierceMsg, wrapAt).length) : 0;
+      var dullRows = dullMsg ? Math.min(2, wrapText(dullMsg, wrapAt).length) : 0;
       var whyRows = whyMsg ? Math.min(2, wrapText(whyMsg, wrapAt).length) : 0;
       win.h = rideWinHeight(r, win.w);
 
@@ -4111,6 +4152,13 @@ function openRideWin(ride) {
           text(g, fl[k], x, y + k * 9, r.ratings.intensity > UNRIDEABLE ? '#7a1f18' : '#7a4a10');
         }
         y += fierceRows * 9 + 2;
+      }
+      /* Read straight off the current ticket price, so dragging the price down
+         clears this line as you watch. */
+      if (dullRows) {
+        var dl = wrapText(dullMsg, wrapAt);
+        for (var m = 0; m < dullRows; m++) text(g, dl[m], x, y + m * 9, '#7a4a10');
+        y += dullRows * 9 + 2;
       }
       var why = whyMsg;
       if (why) {
