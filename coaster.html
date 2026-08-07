@@ -1755,7 +1755,7 @@ function rideWinHeight(ride, w) {
   var dr = dull ? Math.min(2, wrapText(dull, wrapAt).length) : 0;
   var er = deadEnd ? Math.min(2, wrapText(deadEnd, wrapAt).length) : 0;
   var wr = why ? Math.min(2, wrapText(why, wrapAt).length) : 0;
-  return 118 + fr * 9 + (fr ? 2 : 0) + dr * 9 + (dr ? 2 : 0)
+  return 133 + fr * 9 + (fr ? 2 : 0) + dr * 9 + (dr ? 2 : 0)
              + er * 9 + (er ? 2 : 0) + wr * 9;
 }
 /* The most any guest could score this ride: the one whose taste fits it
@@ -2090,8 +2090,11 @@ function computeRatings(ride) {
   if (ride.status !== 'open') ride.status = 'closed';
 }
 
-function sampleAt(s) {
-  var P = sim.path, L = P.len, pts = P.pts;
+/* Sampling took the path from the sim global, which is why a working ride's
+   train could never be drawn: only the test lap had a path to sample. */
+function sampleAt(s) { return sampleOn(sim.path, s); }
+function sampleOn(P, s) {
+  var L = P.len, pts = P.pts;
   s = ((s % L) + L) % L;
   var lo = 0, hi = pts.length - 1;
   while (lo < hi - 1) {
@@ -2208,7 +2211,7 @@ function projectDir(tx, ty, lz) {
 
 var CAR_COLS = ['#e0402c', '#d03a2a', '#c03626', '#b03222'];
 
-function drawCar(g, ride, st, idx) {
+function drawCar(g, ride, st, idx, full) {
   var P = ridePhysics(ride);
   var pos = projectWorld(ride, st.x, st.y, st.z);
   var d = projectDir(st.t.x / P.tileMetres, st.t.y / P.tileMetres, st.t.z / P.levelMetres);
@@ -2222,22 +2225,33 @@ function drawCar(g, ride, st, idx) {
     g.fillStyle = '#2a1210'; g.fillRect(x, y - 1, 1, 3);
     g.fillStyle = col;       g.fillRect(x, y - 5, 1, 4);
     g.fillStyle = shadeHex(col, 1.3); g.fillRect(x, y - 5, 1, 1);
-    if (!inverted && (i === -3 || i === 1)) {
+    if (!inverted && full && (i === -3 || i === 1)) {
       g.fillStyle = '#e8c49a'; g.fillRect(x, y - 7, 1, 2);
     }
   }
 }
 
 var carMap = {};
+/* Every train on the map, not just the one being tested: a ride carrying
+   guests is the whole point, and it was invisible. */
 function buildCarMap() {
   carMap = {};
-  if (!sim.active || !sim.path || !sim.ride) return;
-  var P = ridePhysics(sim.ride);
+  if (sim.active && sim.path && sim.ride) addCars(sim.ride, sim.path, sim.s, -1);
+  for (var r = 0; r < rides.length; r++) {
+    if (rides[r].run) addCars(rides[r], rides[r].run.path, rides[r].run.s,
+                              rides[r].run.riders.length);
+  }
+}
+function addCars(ride, path, s, riders) {
+  var P = ridePhysics(ride);
+  var cap = rideType(ride.typeId).capacity;
   for (var i = 0; i < P.cars; i++) {
-    var st = sampleAt(sim.s - i * P.carGap);
+    var st = sampleOn(path, s - i * P.carGap);
     var key = clamp(Math.round(st.x / P.tileMetres), 0, WORLD - 1) + ',' +
               clamp(Math.round(st.y / P.tileMetres), 0, WORLD - 1);
-    (carMap[key] || (carMap[key] = [])).push({ st: st, i: i });
+    // riders < 0 means a test lap: show it crewed, as it always has been
+    var full = riders < 0 || (i * cap / P.cars) < riders;
+    (carMap[key] || (carMap[key] = [])).push({ st: st, i: i, ride: ride, full: full });
   }
 }
 
@@ -3675,7 +3689,8 @@ function drawWorld(g) {
       if (folk) for (var fi2 = 0; fi2 < folk.length; fi2++) drawGuest(folk[fi2], g);
 
       var cars = carMap[w.x + ',' + w.y];
-      if (cars) for (var ci = 0; ci < cars.length; ci++) drawCar(g, sim.ride, cars[ci].st, cars[ci].i);
+      if (cars) for (var ci = 0; ci < cars.length; ci++)
+        drawCar(g, cars[ci].ride, cars[ci].st, cars[ci].i, cars[ci].full);
 
       // a faint grid over everything you are allowed to build on
       if (!far && armed() && buildableHere(t)) {
@@ -4188,6 +4203,10 @@ function openRideWin(ride) {
       text(g, 'TICKET', x, y, PAL.uiDim);
       text(g, '£' + r.ticketPrice.toFixed(2), x + 50, y, PAL.uiText);
       y += 23;                       // clears the price buttons below the row
+      /* Whether a ride is actually earning was only visible in the books. */
+      text(g, 'TAKEN', x, y, PAL.uiDim);
+      text(g, money(r.takings || 0), x + 50, y, PAL.uiText);
+      y += 11;
       if (fierceRows) {
         var fl = wrapText(fierceMsg, wrapAt);
         for (var k = 0; k < fierceRows; k++) {
