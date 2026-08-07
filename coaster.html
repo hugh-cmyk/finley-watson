@@ -147,7 +147,7 @@ var PAL = {
   plat:   '#9a9a94', platD: '#6c6c67', chain: '#3f3f3f', brake: '#a83232',
   fence:  '#a08050', fenceD: '#6b5232',
   sign:   '#efeada', signD: '#8d8674', signPost: '#6b5136',
-  ghostOK: '#3fd94e', ghostNo: '#e04030',
+  ghostOK: '#3fd94e', ghostNo: '#e04030', ghostPart: '#e8a51e',
   leafL:  '#5aa93f', leafM: '#3e7a33', leafD: '#2f5b27',
   ui:     '#a0a0a0', uiFace: '#b4b4b4', uiHi: '#ffffff', uiLo: '#585858',
   uiBar:  '#6b6b6b', uiText: '#000000', uiCap: '#ffffff', uiDim: '#4a4a4a',
@@ -1093,14 +1093,40 @@ function route(fx, fy, tx, ty) {
 }
 
 /* Doors are not path tiles, so a walk to one ends on the path beside it and
-   then takes a single step in. */
+   then takes a single step in. Everything that asks "can the gate reach this?"
+   asks this one function, so the answer cannot differ between the ride status,
+   a shop's window and where a guest is actually able to walk. Strictly the
+   four edges: a corner touch is not a join, because no guest can cross it. */
 function approachTile(x, y) {
   var t = tileAt(x, y);
-  if (t && t.path) return { x: x, y: y };
+  if (t && t.path && isConnected(x, y)) return { x: x, y: y };
   for (var d = 0; d < 4; d++) {
     var nx = x + DX[d], ny = y + DY[d];
     var nb = tileAt(nx, ny);
     if (nb && nb.path && isConnected(nx, ny)) return { x: nx, y: ny };
+  }
+  return null;
+}
+function reachable(x, y) { return !!approachTile(x, y); }
+
+/* Object kinds the connectivity overlay has an opinion about: the ones a
+   guest has to be able to walk up to. The park gate is where the walk starts,
+   so it is not one of them. */
+var LINKED_OBJECTS = { rideEntrance: 1, rideExit: 1, facility: 1 };
+
+/* Which free tile beside a door would join it up, so the refusal can name a
+   square to build on rather than only stating what is wrong. */
+function joiningTile(tile) {
+  if (!tile) return null;
+  for (var d = 0; d < 4; d++) {
+    var nx = tile.x + DX[d], ny = tile.y + DY[d];
+    var t = tileAt(nx, ny);
+    if (!t || t.path || t.rideId !== null || !t.owned || isWater(t)) continue;
+    for (var e = 0; e < 4; e++) {
+      var mx = nx + DX[e], my = ny + DY[e];
+      var m = tileAt(mx, my);
+      if (m && m.path && isConnected(mx, my)) return { x: nx, y: ny };
+    }
   }
   return null;
 }
@@ -1636,24 +1662,28 @@ function reclaimTiles(ride) {
 /* Can this ride open? Every refusal names itself, because "nothing happens"
    is the worst answer a park game can give. The connectivity rule is the
    whole point of the path graph. */
-function doorReachable(tile) {
-  if (!tile) return false;
-  for (var d = 0; d < 4; d++) {
-    var nx = tile.x + DX[d], ny = tile.y + DY[d];
-    var t = tileAt(nx, ny);
-    if (t && t.path && isConnected(nx, ny)) return true;
-  }
-  return false;
-}
+function doorReachable(tile) { return !!tile && reachable(tile.x, tile.y); }
 function canOpen(ride) {
   if (!ride.complete) return 'THE CIRCUIT IS NOT FINISHED';
   if (!ride.entranceTile) return 'IT NEEDS A WAY IN: TAP EDIT';
   if (!ride.exitTile) return 'IT NEEDS A WAY OUT: TAP EDIT';
   if (!ride.tested) return 'IT HAS NOT BEEN TESTED';
   if (ride.stalled) return 'IT STALLED IN SERVICE: TEST IT AGAIN';
-  if (!doorReachable(ride.entranceTile)) return 'THE WAY IN IS NOT CONNECTED TO THE PARK ENTRANCE';
-  if (!doorReachable(ride.exitTile)) return 'THE WAY OUT IS NOT CONNECTED TO THE PARK ENTRANCE';
+  if (!doorReachable(ride.entranceTile)) return doorRefusal('THE WAY IN', ride.entranceTile);
+  if (!doorReachable(ride.exitTile)) return doorRefusal('THE WAY OUT', ride.exitTile);
   return null;
+}
+/* A corner touch looks like a join at this angle, so name the square that
+   would actually make it one rather than only saying it is not connected. */
+function doorRefusal(which, tile) {
+  // a path that is there but orphaned is a different problem from no path
+  for (var d = 0; d < 4; d++) {
+    var n = tileAt(tile.x + DX[d], tile.y + DY[d]);
+    if (n && n.path) return 'THE PATH BY ' + which + ' DOES NOT REACH THE GATE';
+  }
+  var j = joiningTile(tile);
+  if (j) return which + ' NEEDS A PATH AT ' + j.x + ',' + j.y;
+  return which + ' NEEDS A PATH ALONGSIDE IT, NOT ACROSS A CORNER';
 }
 /* An open ride that nobody will queue for looks exactly like a broken one, so
    say which it is. Read straight from the tolerances guests are built with. */
@@ -3528,6 +3558,19 @@ function drawWorld(g) {
       }
 
       if (t.object && !(far && t.object.type === 'tree')) drawObject(g, t.object, sx, sy);
+
+      /* Doors and shops are not path tiles, so the tint above skips them and
+         the overlay used to imply a door was fine when nothing could reach it.
+         They answer the same question the ride status asks. */
+      if (ui.showLinks && !t.path && t.object && LINKED_OBJECTS[t.object.type]) {
+        g.globalAlpha = 0.45;
+        g.fillStyle = reachable(w.x, w.y) ? PAL.ghostOK : PAL.ghostNo;
+        for (var ly = 0; ly < 16; ly++) {
+          var lsp = diamondSpan(ly);
+          g.fillRect(sx + lsp[0], sy + ly, lsp[1], 1);
+        }
+        g.globalAlpha = 1;
+      }
     }
   }
 }
@@ -3713,11 +3756,16 @@ function drawTrackGhost(g) {
     for (var j = 0; j < sides.length; j++) {
       var st = tileAt(sides[j].x, sides[j].y);
       if (!st) continue;
+      /* Three states, not two: green is legal AND already joined to a path,
+         amber is legal but would leave the ride unopenable, red is refused.
+         Without the middle one a corner-touching square looks like a good
+         square, which is the whole trap. */
       var ok = doorPlan(ride, sides[j].x, sides[j].y).ok;
+      var joined = ok && reachable(sides[j].x, sides[j].y);
       var srx = rotX(sides[j].x, sides[j].y), sry = rotY(sides[j].x, sides[j].y);
       drawTileOutline(g, (srx - sry) * HW + cam.x,
                          (srx + sry) * HH - surfaceLevel(st) * ZH + cam.y,
-                         ok ? PAL.ghostOK : PAL.ghostNo);
+                         !ok ? PAL.ghostNo : joined ? PAL.ghostOK : PAL.ghostPart);
     }
     return;
   }
@@ -4040,19 +4088,10 @@ function openFacilityWin(x, y) {
   });
 }
 
-/* A shop is reachable if the path at its door is, which is the same rule a
-   ride's entrance answers to. */
-function facilityReachable(x, y) {
-  var t = tileAt(x, y);
-  if (!t) return false;
-  if (t.path) return isConnected(x, y);
-  for (var d = 0; d < 4; d++) {
-    var nx = x + DX[d], ny = y + DY[d];
-    var nb = tileAt(nx, ny);
-    if (nb && nb.path && isConnected(nx, ny)) return true;
-  }
-  return false;
-}
+/* A shop is reachable if the path at its door is — the same rule a ride's
+   entrance answers to, and now literally the same function. A bench sits on
+   the path itself, which is why the tile's own square counts. */
+function facilityReachable(x, y) { return reachable(x, y); }
 
 function openBooksWin() {
   openWin({
