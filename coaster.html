@@ -1097,22 +1097,35 @@ function route(fx, fy, tx, ty) {
    asks this one function, so the answer cannot differ between the ride status,
    a shop's window and where a guest is actually able to walk. Strictly the
    four edges: a corner touch is not a join, because no guest can cross it. */
-function approachTile(x, y) {
+function approachTile(x, y, anyPath) {
   var t = tileAt(x, y);
-  if (t && t.path && isConnected(x, y)) return { x: x, y: y };
+  if (t && t.path && (anyPath || isConnected(x, y))) return { x: x, y: y };
   for (var d = 0; d < 4; d++) {
     var nx = x + DX[d], ny = y + DY[d];
     var nb = tileAt(nx, ny);
-    if (nb && nb.path && isConnected(nx, ny)) return { x: nx, y: ny };
+    if (nb && nb.path && (anyPath || isConnected(nx, ny))) return { x: nx, y: ny };
   }
   return null;
 }
+/* Joined to the gate, versus merely having a path against it. The way in needs
+   the first; the way out only needs the second, because riders can be set down
+   anywhere and walked home from the way in if the exit path is a dead end. */
 function reachable(x, y) { return !!approachTile(x, y); }
+function hasPathBeside(x, y) { return !!approachTile(x, y, true); }
 
 /* Object kinds the connectivity overlay has an opinion about: the ones a
    guest has to be able to walk up to. The park gate is where the walk starts,
    so it is not one of them. */
 var LINKED_OBJECTS = { rideEntrance: 1, rideExit: 1, facility: 1 };
+
+/* Green joined to the gate, red nothing to walk on at all, and for a way out
+   amber in between: it has a path, that path is a dead end, and that is
+   allowed. Red must keep meaning broken or the overlay says nothing. */
+function linkTint(x, y, type) {
+  if (reachable(x, y)) return PAL.ghostOK;
+  if (type === 'rideExit' && hasPathBeside(x, y)) return PAL.ghostPart;
+  return PAL.ghostNo;
+}
 
 /* Could a path be laid here at all, and would laying one here reach the gate?
    The refusal, the door-placing tint and the hint shown while you are drawing
@@ -1151,7 +1164,9 @@ function doorHintTiles() {
     var doors = [rides[i].entranceTile, rides[i].exitTile];
     for (var k = 0; k < doors.length; k++) {
       var dt = doors[k];
-      if (!dt || doorReachable(dt)) continue;
+      if (!dt) continue;
+      // the way out asks only for a path against it, so do not nag for more
+      if (k === 1 ? hasPathBeside(dt.x, dt.y) : doorReachable(dt)) continue;
       for (var d = 0; d < 4; d++) {
         var nx = dt.x + DX[d], ny = dt.y + DY[d];
         var t = tileAt(nx, ny);
@@ -1702,7 +1717,9 @@ function canOpen(ride) {
   if (!ride.tested) return 'IT HAS NOT BEEN TESTED';
   if (ride.stalled) return 'IT STALLED IN SERVICE: TEST IT AGAIN';
   if (!doorReachable(ride.entranceTile)) return doorRefusal('THE WAY IN', ride.entranceTile);
-  if (!doorReachable(ride.exitTile)) return doorRefusal('THE WAY OUT', ride.exitTile);
+  // the way out only needs somewhere to set riders down; where that path goes
+  // is a warning, not a refusal, because riders can walk home from the way in
+  if (!hasPathBeside(ride.exitTile.x, ride.exitTile.y)) return doorRefusal('THE WAY OUT', ride.exitTile);
   return null;
 }
 /* A corner touch looks like a join at this angle, so name the square that
@@ -1732,11 +1749,14 @@ function rideWinHeight(ride, w) {
   var wrapAt = Math.floor((w - 12) / ADV);
   var fierce = intensityWarning(ride);
   var dull = appealWarning(ride);
+  var deadEnd = exitWarning(ride);
   var why = ride.status !== 'open' ? canOpen(ride) : null;
   var fr = fierce ? Math.min(2, wrapText(fierce, wrapAt).length) : 0;
   var dr = dull ? Math.min(2, wrapText(dull, wrapAt).length) : 0;
+  var er = deadEnd ? Math.min(2, wrapText(deadEnd, wrapAt).length) : 0;
   var wr = why ? Math.min(2, wrapText(why, wrapAt).length) : 0;
-  return 118 + fr * 9 + (fr ? 2 : 0) + dr * 9 + (dr ? 2 : 0) + wr * 9;
+  return 118 + fr * 9 + (fr ? 2 : 0) + dr * 9 + (dr ? 2 : 0)
+             + er * 9 + (er ? 2 : 0) + wr * 9;
 }
 /* The most any guest could score this ride: the one whose taste fits it
    exactly, with the strongest stomach and money to spare, arriving at an empty
@@ -1767,6 +1787,16 @@ function appealWarning(ride) {
   if (bestPossibleScore(ride) > WORTH_RIDING) return null;
   if (bestPossibleScore(ride, 0) > WORTH_RIDING) return 'TOO DULL FOR THE PRICE';
   return 'TOO DULL: NOBODY WILL RIDE IT';
+}
+
+/* The way out has a path but that path goes nowhere. Legal, so it does not
+   block opening, but the consequence has to be on screen or the compromise is
+   invisible — which is how every one of these has bitten so far. */
+function exitWarning(ride) {
+  if (!ride.exitTile) return null;
+  if (!hasPathBeside(ride.exitTile.x, ride.exitTile.y)) return null;   // canOpen says that
+  if (doorReachable(ride.exitTile)) return null;
+  return 'THE WAY OUT LEADS NOWHERE: RIDERS LEAVE BY THE WAY IN';
 }
 
 function rideStatusText(ride) {
@@ -2242,6 +2272,10 @@ var STRONGEST = TOLERANCE.tolFrom + TOLERANCE.tolSpan;   // the strongest stomac
    open, joined and faultless and still draw nobody. */
 var WORTH_RIDING = 0.4;
 
+/* A breather after getting off, so riders set down beside a door do not turn
+   straight round and rejoin the queue they just left. */
+var RIDE_BREATHER = 12;
+
 function spawnGuest() {
   var rnd = Math.random;
   var e = world.entrance;
@@ -2324,6 +2358,7 @@ function rideScore(g, ride) {
   if (r.intensity > g.intensityPreference + TOLERANCE.over) return -1;
   if (ride.ticketPrice > g.money) return -1;
   if (ride.queue.length >= 24) return -1;
+  if (g.rideCool > 0) return -1;                 // just got off something
 
   var fit = 1 - Math.abs(r.intensity - g.intensityPreference) / 8;
   var novelty = g.ridden[ride.id] ? 0.55 : 1.25;
@@ -2425,6 +2460,7 @@ function stepGuests(dt) {
     g = guests[i];
     g.visit -= dt;
     if (g.thoughtT > 0) g.thoughtT -= dt;
+    if (g.rideCool > 0) g.rideCool -= dt;
 
     g.hunger = clamp(g.hunger + NEEDS.hunger * dt, 0, 100);
     g.thirst = clamp(g.thirst + NEEDS.thirst * dt, 0, 100);
@@ -2691,8 +2727,11 @@ function unloadRiders(ride, riders, stalled) {
   /* Onto the path beside the door, never the door itself: a door is not a
      path tile, so it is not in the graph, and anyone left standing on one can
      never route anywhere again. Returns false when there is nowhere safe. */
-  var door = ride.exitTile || ride.entranceTile;
-  var spot = door ? approachTile(door.x, door.y) : null;
+  /* By the way out if that path reaches the gate; otherwise by the way in,
+     which is joined by definition. Never onto a dead-end path: riders left
+     there can neither ride, shop nor go home, and count as lost for ever. */
+  var spot = ride.exitTile ? approachTile(ride.exitTile.x, ride.exitTile.y) : null;
+  if (!spot && ride.entranceTile) spot = approachTile(ride.entranceTile.x, ride.entranceTile.y);
   if (!spot) return false;
   var st = tileAt(spot.x, spot.y);
   var level = st && st.path ? st.path.level : (st ? st.h : 0);
@@ -2702,6 +2741,7 @@ function unloadRiders(ride, riders, stalled) {
     g.ridden[ride.id] = true;
     g.state = 'walk';
     g.route = null; g.target = null;
+    g.rideCool = RIDE_BREATHER;
     g.x = spot.x; g.y = spot.y;
     g.level = level;
     if (stalled) {
@@ -3655,7 +3695,7 @@ function drawWorld(g) {
          They answer the same question the ride status asks. */
       if (ui.showLinks && !t.path && t.object && LINKED_OBJECTS[t.object.type]) {
         g.globalAlpha = 0.45;
-        g.fillStyle = reachable(w.x, w.y) ? PAL.ghostOK : PAL.ghostNo;
+        g.fillStyle = linkTint(w.x, w.y, t.object.type);
         for (var ly = 0; ly < 16; ly++) {
           var lsp = diamondSpan(ly);
           g.fillRect(sx + lsp[0], sy + ly, lsp[1], 1);
@@ -4124,10 +4164,12 @@ function openRideWin(ride) {
       if (!r) return;
       var fierceMsg = intensityWarning(r);
       var dullMsg = appealWarning(r);
+      var exitMsg = exitWarning(r);
       var whyMsg = r.status !== 'open' ? canOpen(r) : null;
       var wrapAt = Math.floor((win.w - 12) / ADV);
       var fierceRows = fierceMsg ? Math.min(2, wrapText(fierceMsg, wrapAt).length) : 0;
       var dullRows = dullMsg ? Math.min(2, wrapText(dullMsg, wrapAt).length) : 0;
+      var exitRows = exitMsg ? Math.min(2, wrapText(exitMsg, wrapAt).length) : 0;
       var whyRows = whyMsg ? Math.min(2, wrapText(whyMsg, wrapAt).length) : 0;
       win.h = rideWinHeight(r, win.w);
 
@@ -4159,6 +4201,11 @@ function openRideWin(ride) {
         var dl = wrapText(dullMsg, wrapAt);
         for (var m = 0; m < dullRows; m++) text(g, dl[m], x, y + m * 9, '#7a4a10');
         y += dullRows * 9 + 2;
+      }
+      if (exitRows) {
+        var el = wrapText(exitMsg, wrapAt);
+        for (var q = 0; q < exitRows; q++) text(g, el[q], x, y + q * 9, '#7a4a10');
+        y += exitRows * 9 + 2;
       }
       var why = whyMsg;
       if (why) {
