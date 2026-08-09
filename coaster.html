@@ -1685,7 +1685,7 @@ function undoRidePiece(ride) {
   ride.tested = false;
   if (ride.status === 'open') ride.status = 'closed';
   reclaimTiles(ride);
-  if (build.mode === 'entrance' || build.mode === 'exit') build.mode = 'track';
+  if (build.mode === 'entrance' || build.mode === 'exit') { build.mode = 'track'; build.doorOnly = false; }
   layoutUI();
 }
 
@@ -3286,8 +3286,8 @@ function layoutUI() {
   if (build.mode === 'track' && build.ride) {
     var bw = findWin('build');
     if (!bw) {
-      bw = openWinRaw({ id: 'build', title: 'BUILD TRACK', w: 128, h: 114,
-                        x: 8, y: Math.max(20, uiH - 170), draw: drawBuildWinBody });
+      bw = openWinRaw({ id: 'build', title: 'BUILD TRACK', w: 128, h: 138,
+                        x: 8, y: Math.max(20, uiH - 194), draw: drawBuildWinBody });
     }
     var pal = PIECE_PALETTES[rideType(build.ride.typeId).pieceSet];
     for (var pi = 0; pi < pal.length; pi++) {
@@ -3303,6 +3303,13 @@ function layoutUI() {
       buttons.push({ id: 'do_build', x: bw.x + 5, y: bw.y + 71, w: 52, h: 18, label: 'BUILD' });
     }
     buttons.push({ id: 'do_undo',  x: bw.x + 61, y: bw.y + 71, w: 40, h: 18, label: 'UNDO' });
+    /* Hanging the doors used to be reachable only in the moment the circuit
+       closed. They belong here, beside the track, where they can be placed
+       or moved whenever. Lit when that door is already on the map. */
+    buttons.push({ id: 'do_wayin',  x: bw.x + 5,  y: bw.y + 93, w: 56, h: 18,
+                   label: 'WAY IN',  on: !!build.ride.entranceTile });
+    buttons.push({ id: 'do_wayout', x: bw.x + 65, y: bw.y + 93, w: 56, h: 18,
+                   label: 'WAY OUT', on: !!build.ride.exitTile });
   } else if (findWin('build')) {
     closeWinQuiet('build');
   }
@@ -3536,6 +3543,15 @@ function pressButton(b) {
     case 'do_build': if (build.ride) placeRidePiece(build.ride, build.piece); break;
     case 'do_undo':  if (build.ride) undoRidePiece(build.ride); break;
     case 'do_test':  if (build.ride) startRun(build.ride, 'test'); break;
+    case 'do_wayin':
+    case 'do_wayout':
+      if (!build.ride) break;
+      build.mode = b.id === 'do_wayin' ? 'entrance' : 'exit';
+      build.doorOnly = true;              // came here on purpose, not mid-build
+      toast(build.mode === 'entrance' ? 'TAP A TILE BY THE STATION FOR THE WAY IN'
+                                      : 'TAP A TILE BY THE STATION FOR THE WAY OUT');
+      layoutUI();
+      break;
     case 'sim_stop': stopRun(); break;
     case 'sim_again': if (sim.ride) startRun(sim.ride, 'test'); break;
     case 'sim_cam':  sim.follow = !sim.follow; layoutUI(); break;
@@ -3559,6 +3575,7 @@ function pressButton(b) {
       break;
     case 'door_skip':
       build.mode = 'track';
+      build.doorOnly = false;
       layoutUI();
       break;
   }
@@ -4090,7 +4107,7 @@ function drawBuildWinBody(g, win) {
   else { line = (ride.pieces.length - 1) + ' PIECES - NOT CLOSED YET'; }
   var lines = wrapText(line, Math.floor((win.w - 10) / ADV));
   for (var i = 0; i < Math.min(2, lines.length); i++) {
-    text(g, lines[i], win.x + 5, win.y + 93 + i * 9, ink);
+    text(g, lines[i], win.x + 5, win.y + 115 + i * 9, ink);
   }
 }
 
@@ -4721,19 +4738,32 @@ function tap(b, uiPt) {
     if (!t) return;
     var plan = doorPlan(build.ride, t.x, t.y);
     if (!plan.ok) { toast(plan.why); return; }
+    /* A door can now be placed again to move it, so lift the old one first or
+       it leaves a hut nobody can remove on a tile nothing can be built on. */
+    var old = build.mode === 'entrance' ? build.ride.entranceTile : build.ride.exitTile;
+    if (old) {
+      var ot = tileAt(old.x, old.y);
+      if (ot && ot.object &&
+          (ot.object.type === 'rideEntrance' || ot.object.type === 'rideExit')) {
+        ot.object = null;
+        ot.rideId = null;
+      }
+    }
     var tile = tileAt(t.x, t.y);
     tile.rideId = build.ride.id;
     tile.object = { type: build.mode === 'entrance' ? 'rideEntrance' : 'rideExit',
                     rideId: build.ride.id };
+    var onPurpose = build.doorOnly;
+    build.doorOnly = false;
     if (build.mode === 'entrance') {
       build.ride.entranceTile = { x: t.x, y: t.y };
-      build.mode = 'exit';
-      toast('NOW THE WAY OUT');
+      if (onPurpose) { build.mode = 'track'; toast('WAY IN SET'); }
+      else { build.mode = 'exit'; toast('NOW THE WAY OUT'); }
     } else {
       build.ride.exitTile = { x: t.x, y: t.y };
       build.mode = 'track';
-      build.ride.status = 'closed';
-      toast(build.ride.name + ' IS BUILT');
+      if (onPurpose) toast('WAY OUT SET');
+      else { build.ride.status = 'closed'; toast(build.ride.name + ' IS BUILT'); }
     }
     layoutUI();
     saveGame();
