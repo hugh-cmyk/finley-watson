@@ -1130,8 +1130,9 @@ function linkTint(x, y, type) {
 /* Could a path be laid here at all, and would laying one here reach the gate?
    The refusal, the door-placing tint and the hint shown while you are drawing
    all ask these, so they cannot drift apart the way the old copies did. */
-function freeForPath(t) {
-  return !!t && !t.path && t.rideId === null && t.owned && !isWater(t);
+function freeForPath(x, y) {
+  var t = tileAt(x, y);
+  return !!t && !t.path && pathPlan(x, y, 'foot').ok;
 }
 function wouldJoin(x, y) {
   for (var e = 0; e < 4; e++) {
@@ -1149,7 +1150,7 @@ function joiningTile(tile) {
   if (!tile) return null;
   for (var d = 0; d < 4; d++) {
     var nx = tile.x + DX[d], ny = tile.y + DY[d];
-    if (!freeForPath(tileAt(nx, ny))) continue;
+    if (!freeForPath(nx, ny)) continue;
     if (wouldJoin(nx, ny)) return { x: nx, y: ny };
   }
   return null;
@@ -1170,7 +1171,7 @@ function doorHintTiles() {
       for (var d = 0; d < 4; d++) {
         var nx = dt.x + DX[d], ny = dt.y + DY[d];
         var t = tileAt(nx, ny);
-        if (!freeForPath(t)) continue;
+        if (!freeForPath(nx, ny)) continue;
         out.push({ x: nx, y: ny, tile: t, joins: wouldJoin(nx, ny) });
       }
     }
@@ -1182,6 +1183,25 @@ function doorHintTiles() {
    A path takes the ground height it sits on, except over water, where it
    becomes a bridge one level above the surface and grows supports. */
 
+/* How low the track hangs over a tile, and whether that stretch is the
+   station. Only the ride that claims the tile is searched, so this costs
+   nothing worth measuring. */
+var HEADROOM = 2;                       // levels of clear air to walk under
+function trackOverhead(x, y, rideId) {
+  var ride = rideById(rideId);
+  if (!ride) return null;
+  var low = null, station = false;
+  for (var p = 0; p < ride.pieces.length; p++) {
+    var pc = ride.pieces[p], cells = pc.cells || [];
+    for (var c = 0; c < cells.length; c++) {
+      if (cells[c].x !== x || cells[c].y !== y) continue;
+      if (pc.type === 'station') station = true;
+      if (low === null || cells[c].z0 < low) low = cells[c].z0;
+    }
+  }
+  return low === null ? null : { low: low, station: station };
+}
+
 function pathPlan(x, y, typeId) {
   var t = tileAt(x, y);
   if (!t) return { ok: false, why: 'OFF THE MAP' };
@@ -1190,7 +1210,14 @@ function pathPlan(x, y, typeId) {
   var bridge = isWater(t);
   var level = bridge ? t.water + 1 : t.h;
   if (t.object && t.object.type !== 'tree') return { ok: false, why: 'SOMETHING IS IN THE WAY' };
-  if (t.rideId !== null) return { ok: false, why: 'A RIDE IS IN THE WAY' };
+  /* Track overhead is not an obstruction if it is high enough to walk under.
+     Without this a coaster fences off everything it encircles. */
+  if (t.rideId !== null) {
+    var over = trackOverhead(x, y, t.rideId);
+    if (!over) return { ok: false, why: 'A RIDE IS IN THE WAY' };
+    if (over.station) return { ok: false, why: 'THE STATION IS IN THE WAY' };
+    if (over.low < level + HEADROOM) return { ok: false, why: 'THE TRACK IS TOO LOW HERE' };
+  }
   if (t.path && t.path.type === typeId && t.path.level === level) {
     return { ok: false, why: 'ALREADY PAVED', silent: true };
   }
