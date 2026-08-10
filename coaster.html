@@ -1495,6 +1495,7 @@ var RIDE_TYPES = [
     id: 'coaster', name: 'TIMBER COASTER', category: 'COASTERS',
     buildMode: 'track', needsWater: false,
     baseCost: 600, capacity: 8, weatherAffinity: 1,
+    maxTrains: 2, trainSpacing: 0.34,
     pieceSet: 'coaster',
     physics: {
       gravity: 9.81, friction: 0.022, drag: 0.0016,
@@ -2741,11 +2742,10 @@ function serveFacilities(dt) {
   }
 }
 
-/* Two trains may share a track. The one behind waits at the block until the
-   one in front is a train's length and a half clear, and none leaves the
-   station until the last is a third of the way round. */
-var MAX_TRAINS = 2;
-var TRAIN_SPACING = 0.34;
+/* How many vehicles share a track, and how far the last must be round before
+   the next may leave, are per ride type: a coaster runs two trains a third of
+   a lap apart, a gentler ride might run six. The one behind is held until the
+   one in front is a train's length and a half clear. */
 function blockGap(P) { return P.cars * P.carGap * 1.6; }
 
 function operateRides(dt) {
@@ -2768,13 +2768,14 @@ function operateRides(dt) {
 
     if (ride.status !== 'open' || !ride.tested) continue;
     if (ride.dwell > 0 || !ride.queue.length) continue;
-    if (runs.length >= MAX_TRAINS) continue;
+    var type = rideType(ride.typeId);
+    if (runs.length >= type.maxTrains) continue;
     // and not until the last one away is clear of the station
     var tail = runs[runs.length - 1];
-    if (tail && tail.s < tail.path.len * TRAIN_SPACING) continue;
+    if (tail && tail.s < tail.path.len * type.trainSpacing) continue;
 
     var P = ridePhysics(ride);
-    var load = Math.min(ride.queue.length, rideType(ride.typeId).capacity);
+    var load = Math.min(ride.queue.length, type.capacity);
     var riders = ride.queue.splice(0, load);
     for (var k = 0; k < riders.length; k++) {
       riders[k].state = 'ride';
