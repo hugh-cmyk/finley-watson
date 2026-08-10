@@ -2265,8 +2265,8 @@ function buildCarMap() {
   carMap = {};
   if (sim.active && sim.path && sim.ride) addCars(sim.ride, sim.path, sim.s, -1);
   for (var r = 0; r < rides.length; r++) {
-    if (rides[r].run) addCars(rides[r], rides[r].run.path, rides[r].run.s,
-                              rides[r].run.riders.length);
+    var rr = rides[r].runs || [];
+    for (var q = 0; q < rr.length; q++) addCars(rides[r], rr[q].path, rr[q].s, rr[q].riders.length);
   }
 }
 function addCars(ride, path, s, riders) {
@@ -2730,6 +2730,13 @@ function serveFacilities(dt) {
   }
 }
 
+/* Two trains may share a track. The one behind waits at the block until the
+   one in front is a train's length and a half clear, and none leaves the
+   station until the last is a third of the way round. */
+var MAX_TRAINS = 2;
+var TRAIN_SPACING = 0.34;
+function blockGap(P) { return P.cars * P.carGap * 1.6; }
+
 function operateRides(dt) {
   serveFacilities(dt);
   for (var i = 0; i < rides.length; i++) {
@@ -2738,13 +2745,22 @@ function operateRides(dt) {
     // the same two substeps the test lap uses: at one full step the integrator
     // loses enough speed on a climb that a ride can pass its test and then
     // stall in service, which is indistinguishable from a broken ride
-    if (ride.run) {
-      stepRideRun(ride, dt / 2);
-      if (ride.run) stepRideRun(ride, dt / 2);
-      continue;
+    /* Trains are held oldest first, so the one in front of runs[n] is
+       runs[n-1]. Stepping from the back means a train sees where the one
+       ahead already is this frame, not where it was last frame. */
+    var runs = ride.runs || (ride.runs = []);
+    for (var n = runs.length - 1; n >= 0; n--) {
+      var r1 = stepRideRun(ride, runs[n], runs[n - 1], dt / 2);
+      var r2 = r1 === 'go' ? stepRideRun(ride, runs[n], runs[n - 1], dt / 2) : r1;
+      if (r1 === 'off' || r2 === 'off') runs.splice(n, 1);
     }
+
     if (ride.status !== 'open' || !ride.tested) continue;
     if (ride.dwell > 0 || !ride.queue.length) continue;
+    if (runs.length >= MAX_TRAINS) continue;
+    // and not until the last one away is clear of the station
+    var tail = runs[runs.length - 1];
+    if (tail && tail.s < tail.path.len * TRAIN_SPACING) continue;
 
     var P = ridePhysics(ride);
     var load = Math.min(ride.queue.length, rideType(ride.typeId).capacity);
@@ -2758,7 +2774,7 @@ function operateRides(dt) {
       park.books.tickets += ride.ticketPrice;
       ride.takings = (ride.takings || 0) + ride.ticketPrice;
     }
-    ride.run = { path: buildRidePath(ride), s: 0.01, v: P.liftSpeed, t: 0, riders: riders };
+    runs.push({ path: buildRidePath(ride), s: 0.01, v: P.liftSpeed, t: 0, riders: riders });
   }
 }
 
@@ -2814,9 +2830,11 @@ function holdRiders(ride) {
   layoutUI();
 }
 
-/* An operating train runs on the same integrator as a test lap. */
-function stepRideRun(ride, dt) {
-  var P = ridePhysics(ride), run = ride.run;
+/* An operating train runs on the same integrator as a test lap. Returns
+   'off' when it has set its riders down and should be taken off the track,
+   'hold' when it has nowhere to set them down, 'go' while it is running. */
+function stepRideRun(ride, run, ahead, dt) {
+  var P = ridePhysics(ride);
   var set = rideType(ride.typeId).pieceSet;
   var pts = run.path.pts, L = run.path.len;
   var sPos = ((run.s % L) + L) % L;
@@ -2832,34 +2850,50 @@ function stepRideRun(ride, dt) {
   if (def.brake && run.v > P.brakeSpeed) a -= P.brakeForce;
   run.v += a * dt;
   if (def.chain && run.v >= 0 && run.v < P.liftSpeed) run.v = P.liftSpeed;
+
   run.s += run.v * dt;
   run.t += dt;
+
+  /* Both trains run the same physics on the same track, so the one behind is
+     the one in front shifted in time and cannot gain on it. This only catches
+     the exception — a train ahead rolling back — and it moves the follower
+     rather than braking it, because a train stopped dead on a gradient can
+     never start again and would read as a stall. */
+  run.blocked = false;
+  if (ahead) {
+    var gap = blockGap(P);
+    if (run.s > ahead.s - gap) {
+      run.s = Math.max(0, ahead.s - gap);
+      run.blocked = true;
+    }
+  }
 
   /* The same test the test lap applies. Without it a train that cannot climb
      shuffles about until the 120s cap while the station stands blocked, which
      reads as "nobody can ride" rather than "this hill is too steep". */
-  if (run.v < P.rollbackSpeed) run.rollT = (run.rollT || 0) + dt * P.rollbackRate;
+  if (run.blocked) run.rollT = 0;                 // held back, not failing
+  else if (run.v < P.rollbackSpeed) run.rollT = (run.rollT || 0) + dt * P.rollbackRate;
   else if (!def.chain && run.v < P.stallSpeed) run.rollT = (run.rollT || 0) + dt;
   else run.rollT = 0;
   if (run.rollT > P.stallAfter) {
-    if (!unloadRiders(ride, run.riders, true)) { holdRiders(ride); return; }
-    ride.run = null;
+    if (!unloadRiders(ride, run.riders, true)) { holdRiders(ride); return 'hold'; }
     ride.dwell = 3;
     ride.stalled = true;
     ride.status = 'closed';
     sfxBad();
     toast(ride.name + ' HAS STALLED');
     layoutUI();
-    return;
+    return 'off';
   }
 
   if (run.s >= L || run.t > 120) {
     var carried = run.riders.length;
-    if (!unloadRiders(ride, run.riders, false)) { holdRiders(ride); return; }
-    ride.run = null;
+    if (!unloadRiders(ride, run.riders, false)) { holdRiders(ride); return 'hold'; }
     ride.dwell = 3;
     ride.riders = (ride.riders || 0) + carried;
+    return 'off';
   }
+  return 'go';
 }
 
 /* ── drawing ── */
