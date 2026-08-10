@@ -1495,7 +1495,7 @@ var RIDE_TYPES = [
     id: 'coaster', name: 'TIMBER COASTER', category: 'COASTERS',
     buildMode: 'track', needsWater: false,
     baseCost: 600, capacity: 8, weatherAffinity: 1,
-    maxTrains: 2, trainSpacing: 0.34,
+    maxTrains: 2, trainSpacing: 0.34, dwell: 3, queueMax: 24,
     pieceSet: 'coaster',
     physics: {
       gravity: 9.81, friction: 0.022, drag: 0.0016,
@@ -1503,7 +1503,7 @@ var RIDE_TYPES = [
       rollbackSpeed: -0.3, rollbackRate: 2.5, stallAfter: 0.8,
       cars: 4, carGap: 2.6, tileMetres: 3, levelMetres: 1.5,
       frameWindow: 0.9, curveWindow: 1.5, sampleStep: 14,
-      airtimeUnder: 0.2, dropMin: 1.2, lapTimeout: 120
+      airtimeUnder: 0.2, dropMin: 1.2, lapTimeout: 120, blockMargin: 1.6
     },
     ratingWeights: {
       excitement: { base: 0.5, drops: 0.22, biggestDrop: 0.10, topSpeed: 0.055,
@@ -2410,7 +2410,7 @@ function rideScore(g, ride) {
   var r = ride.ratings;
   if (r.intensity > g.intensityPreference + TOLERANCE.over) return -1;
   if (ride.ticketPrice > g.money) return -1;
-  if (ride.queue.length >= 24) return -1;
+  if (ride.queue.length >= rideType(ride.typeId).queueMax) return -1;
   if (g.rideCool > 0) return -1;                 // just got off something
 
   var fit = 1 - Math.abs(r.intensity - g.intensityPreference) / 8;
@@ -2746,7 +2746,7 @@ function serveFacilities(dt) {
    the next may leave, are per ride type: a coaster runs two trains a third of
    a lap apart, a gentler ride might run six. The one behind is held until the
    one in front is a train's length and a half clear. */
-function blockGap(P) { return P.cars * P.carGap * 1.6; }
+function blockGap(P) { return P.cars * P.carGap * P.blockMargin; }
 
 function operateRides(dt) {
   serveFacilities(dt);
@@ -2886,7 +2886,7 @@ function stepRideRun(ride, run, ahead, dt) {
   else run.rollT = 0;
   if (run.rollT > P.stallAfter) {
     if (!unloadRiders(ride, run.riders, true)) { holdRiders(ride); return 'hold'; }
-    ride.dwell = 3;
+    ride.dwell = rideType(ride.typeId).dwell;
     ride.stalled = true;
     ride.status = 'closed';
     sfxBad();
@@ -2898,7 +2898,7 @@ function stepRideRun(ride, run, ahead, dt) {
   if (run.s >= L || run.t > P.lapTimeout) {
     var carried = run.riders.length;
     if (!unloadRiders(ride, run.riders, false)) { holdRiders(ride); return 'hold'; }
-    ride.dwell = 3;
+    ride.dwell = rideType(ride.typeId).dwell;
     ride.riders = (ride.riders || 0) + carried;
     return 'off';
   }
