@@ -145,6 +145,7 @@ var PAL = {
   railL:  '#c0c0c0', railD: '#6e6e6e', tie: '#7a5230', tieD: '#4e3320',
   post:   '#6b5136', postD: '#4a3823',
   plat:   '#9a9a94', platD: '#6c6c67', chain: '#3f3f3f', brake: '#a83232',
+  trough: '#8a8f7c', troughD: '#5f6455', flow: '#3f7fb8', flowL: '#5fa3d6',
   fence:  '#a08050', fenceD: '#6b5232',
   sign:   '#efeada', signD: '#8d8674', signPost: '#6b5136',
   ghostOK: '#3fd94e', ghostNo: '#e04030', ghostPart: '#e8a51e',
@@ -618,21 +619,37 @@ function trackSprite(setId, type, sdir, tint) {
     }
   }
 
-  for (i = 0; i <= STEPS; i += 3) {            // sleepers
-    var sm = samples[i];
-    for (var k = -1; k <= 1; k += 0.25) {
-      var sp = proj(sm.u + sm.nu * RAILSEP * k, sm.v + sm.nv * RAILSEP * k, sm.w);
-      plot(sp.x, sp.y + 1, PAL.tieD, false);
-      plot(sp.x, sp.y, PAL.tie, false);
+  if (def.channel) {                           // a trough carrying water
+    for (i = 0; i <= STEPS; i++) {
+      var c0 = samples[i];
+      for (var w0 = -0.7; w0 <= 0.7; w0 += 0.2) {   // the water itself
+        var wp = proj(c0.u + c0.nu * RAILSEP * w0, c0.v + c0.nv * RAILSEP * w0, c0.w);
+        plot(wp.x, wp.y, (i % 9) < 2 && Math.abs(w0) < 0.5 ? PAL.flowL : PAL.flow, true);
+      }
+      for (var side1 = -1; side1 <= 1; side1 += 2) {   // trough walls
+        var tp = proj(c0.u + c0.nu * RAILSEP * side1 * 1.15,
+                      c0.v + c0.nv * RAILSEP * side1 * 1.15, c0.w);
+        plot(tp.x, tp.y + 1, PAL.troughD, false);
+        plot(tp.x, tp.y - 1, PAL.trough, false);
+      }
     }
-  }
+  } else {
+    for (i = 0; i <= STEPS; i += 3) {          // sleepers
+      var sm = samples[i];
+      for (var k = -1; k <= 1; k += 0.25) {
+        var sp = proj(sm.u + sm.nu * RAILSEP * k, sm.v + sm.nv * RAILSEP * k, sm.w);
+        plot(sp.x, sp.y + 1, PAL.tieD, false);
+        plot(sp.x, sp.y, PAL.tie, false);
+      }
+    }
 
-  for (i = 0; i <= STEPS; i++) {               // rails
-    var r = samples[i];
-    for (var side = -1; side <= 1; side += 2) {
-      var rp = proj(r.u + r.nu * RAILSEP * side, r.v + r.nv * RAILSEP * side, r.w);
-      plot(rp.x, rp.y + 1, PAL.railD, false);
-      plot(rp.x, rp.y, side < 0 ? PAL.railL : PAL.rail, true);
+    for (i = 0; i <= STEPS; i++) {             // rails
+      var r = samples[i];
+      for (var side = -1; side <= 1; side += 2) {
+        var rp = proj(r.u + r.nu * RAILSEP * side, r.v + r.nv * RAILSEP * side, r.w);
+        plot(rp.x, rp.y + 1, PAL.railD, false);
+        plot(rp.x, rp.y, side < 0 ? PAL.railL : PAL.rail, true);
+      }
     }
   }
 
@@ -1515,6 +1532,37 @@ var RIDE_TYPES = [
                     intenseOver: 10, intenseMul: 0.35,
                     sicklyOver: 6, sicklyMul: 0.85 }
     }
+  },
+  {
+    id: 'flume', name: 'LOG FLUME', category: 'WATER RIDES',
+    buildMode: 'track', needsWater: false,
+    baseCost: 750, capacity: 4, weatherAffinity: 1.35,
+    maxTrains: 4, trainSpacing: 0.22, dwell: 2, queueMax: 30,
+    pieceSet: 'flume',
+    physics: {
+      /* The current carries the boat: it is pushed towards channelSpeed on
+         the level and up gentle rises, and only a grade steeper than
+         dropTangent hands it over to gravity. */
+      propulsion: 'channel', channelSpeed: 2.9, channelPush: 1.8, dropTangent: 0.34,
+      gravity: 9.81, friction: 0.05, drag: 0.006,
+      liftSpeed: 2.2, brakeSpeed: 4.5, brakeForce: 7, stallSpeed: 0.12,
+      rollbackSpeed: -0.3, rollbackRate: 2.5, stallAfter: 1.6,
+      cars: 1, carGap: 3, tileMetres: 3, levelMetres: 1.5,
+      frameWindow: 0.9, curveWindow: 1.5, sampleStep: 14,
+      airtimeUnder: 0.2, dropMin: 1.2, lapTimeout: 300, blockMargin: 2.2
+    },
+    /* A flume earns its excitement from the drop and the length of the ride,
+       not from speed and airtime, and it barely troubles anyone's stomach. */
+    ratingWeights: {
+      excitement: { base: 0.7, drops: 0.5, biggestDrop: 0.26, topSpeed: 0.02,
+                    airtime: 0.3, inversions: 0, variety: 0.14, length: 0.008 },
+      intensity:  { vertG: 0.3, latG: 0.3, topSpeed: 0.02,
+                    inversions: 0, drops: 0.25, capG: 7 },
+      nausea:     { latG: 0.25, turns: 0.06, inversions: 0, hardG: 0.3, hardGFrom: 3.5 },
+      penalties:  { shortUnder: 24, shortMul: 0.8,
+                    intenseOver: 10, intenseMul: 0.35,
+                    sicklyOver: 6, sicklyMul: 0.85 }
+    }
   }
 ];
 function rideType(id) {
@@ -1545,11 +1593,26 @@ var PIECE_SETS = {
     brake:    { name: 'BRAKES',        cost: 50,  tiles: 1, dz: 0,  slope: 0, brake: true },
     loop:     { name: 'VERTICAL LOOP', cost: 280, tiles: 2, dz: 0,  slope: 0, loop: true,
                 inversion: true, top: 3.2 }
+  },
+  /* A flume is a channel, not a rail: the pieces carry channel:true so the
+     sprite draws a trough of water instead of ties and rails. No loop, and
+     no brake run — the water does the slowing. */
+  flume: {
+    station:  { name: 'STATION',    cost: 0,   tiles: 4, dz: 0,  slope: 0, chain: true, channel: true },
+    straight: { name: 'CHANNEL',    cost: 26,  tiles: 1, dz: 0,  slope: 0, channel: true },
+    curveL:   { name: 'BEND LEFT',  cost: 38,  tiles: 1, dz: 0,  slope: 0, turn: -1, channel: true },
+    curveR:   { name: 'BEND RIGHT', cost: 38,  tiles: 1, dz: 0,  slope: 0, turn: 1,  channel: true },
+    gentleUp: { name: 'GENTLE UP',  cost: 40,  tiles: 1, dz: 1,  slope: 1,  channel: true },
+    gentleDn: { name: 'GENTLE DOWN',cost: 34,  tiles: 1, dz: -1, slope: -1, channel: true },
+    lift:     { name: 'CONVEYOR',   cost: 70,  tiles: 1, dz: 1,  slope: 1,  chain: true, channel: true },
+    splash:   { name: 'SPLASH DROP',cost: 90,  tiles: 1, dz: -2, slope: -2, channel: true }
   }
 };
 var PIECE_PALETTES = {
   coaster: ['straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
-            'steepUp', 'steepDn', 'lift', 'brake', 'loop']
+            'steepUp', 'steepDn', 'lift', 'brake', 'loop'],
+  flume:   ['straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
+            'lift', 'splash']
 };
 function pieceSet(ride) { return PIECE_SETS[rideType(ride.typeId).pieceSet]; }
 function pieceDef(ride, id) { return pieceSet(ride)[id]; }
@@ -1981,7 +2044,14 @@ function ridePhysics(ride) { return rideType(ride.typeId).physics; }
    the chain clamp is part of propulsion: split them and the two callers can
    diverge again, which is the whole reason this exists. */
 function propel(P, def, v, tz, dt) {
-  var a = -P.gravity * tz - P.friction * v - P.drag * v * Math.abs(v);
+  var a;
+  if (P.propulsion === 'channel' && tz > -P.dropTangent) {
+    // the current pushes the boat towards its channel speed along the level
+    // and up gentle rises; only a real drop hands it over to gravity
+    a = (P.channelSpeed - v) * P.channelPush - P.drag * v * Math.abs(v);
+  } else {
+    a = -P.gravity * tz - P.friction * v - P.drag * v * Math.abs(v);
+  }
   if (def.brake && v > P.brakeSpeed) a -= P.brakeForce;
   v += a * dt;
   if (def.chain && v >= 0 && v < P.liftSpeed) v = P.liftSpeed;
