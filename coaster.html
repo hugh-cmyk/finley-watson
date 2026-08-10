@@ -1502,7 +1502,7 @@ var RIDE_TYPES = [
       rollbackSpeed: -0.3, rollbackRate: 2.5, stallAfter: 0.8,
       cars: 4, carGap: 2.6, tileMetres: 3, levelMetres: 1.5,
       frameWindow: 0.9, curveWindow: 1.5, sampleStep: 14,
-      airtimeUnder: 0.2, dropMin: 1.2
+      airtimeUnder: 0.2, dropMin: 1.2, lapTimeout: 120
     },
     ratingWeights: {
       excitement: { base: 0.5, drops: 0.22, biggestDrop: 0.10, topSpeed: 0.055,
@@ -1973,6 +1973,20 @@ function v3cross(a, b) {
 
 function ridePhysics(ride) { return rideType(ride.typeId).physics; }
 
+/* One tick of propulsion. The test lap and the operating train ran their own
+   copies of this and drifted apart once already — that is how a ride could
+   pass its test and then stall in service — so there is one copy and both
+   call it. It returns the new velocity rather than the acceleration because
+   the chain clamp is part of propulsion: split them and the two callers can
+   diverge again, which is the whole reason this exists. */
+function propel(P, def, v, tz, dt) {
+  var a = -P.gravity * tz - P.friction * v - P.drag * v * Math.abs(v);
+  if (def.brake && v > P.brakeSpeed) a -= P.brakeForce;
+  v += a * dt;
+  if (def.chain && v >= 0 && v < P.liftSpeed) v = P.liftSpeed;
+  return v;
+}
+
 function buildRidePath(ride) {
   var P = ridePhysics(ride);
   var set = rideType(ride.typeId).pieceSet;
@@ -2171,12 +2185,9 @@ function stepSim(dt) {
   var st = sampleAt(sim.s);
   var def = PIECE_SETS[set][ride.pieces[st.owner].type];
 
-  var a = -P.gravity * st.t.z - P.friction * sim.v - P.drag * sim.v * Math.abs(sim.v);
-  if (def.brake && sim.v > P.brakeSpeed) a -= P.brakeForce;
-  sim.v += a * dt;
   // the chain only pulls a train that is still going forwards, or one that
   // cannot climb shuffles back and forth for ever instead of failing
-  if (def.chain && sim.v >= 0 && sim.v < P.liftSpeed) sim.v = P.liftSpeed;
+  sim.v = propel(P, def, sim.v, st.t.z, dt);
   sim.s += sim.v * dt;
   sim.t += dt;
 
@@ -2846,10 +2857,7 @@ function stepRideRun(ride, run, ahead, dt) {
   var st = pts[lo];
   var def = PIECE_SETS[set][ride.pieces[run.path.owner[lo]].type];
 
-  var a = -P.gravity * st.t.z - P.friction * run.v - P.drag * run.v * Math.abs(run.v);
-  if (def.brake && run.v > P.brakeSpeed) a -= P.brakeForce;
-  run.v += a * dt;
-  if (def.chain && run.v >= 0 && run.v < P.liftSpeed) run.v = P.liftSpeed;
+  run.v = propel(P, def, run.v, st.t.z, dt);
 
   run.s += run.v * dt;
   run.t += dt;
@@ -2886,7 +2894,7 @@ function stepRideRun(ride, run, ahead, dt) {
     return 'off';
   }
 
-  if (run.s >= L || run.t > 120) {
+  if (run.s >= L || run.t > P.lapTimeout) {
     var carried = run.riders.length;
     if (!unloadRiders(ride, run.riders, false)) { holdRiders(ride); return 'hold'; }
     ride.dwell = 3;
