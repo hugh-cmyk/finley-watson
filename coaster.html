@@ -106,6 +106,11 @@ var PLOT    = 20;      // side of the plot you start out owning
 var HW      = 16;      // half tile width  (tiles are 32×16 diamonds)
 var HH      = 8;       // half tile height
 var ZH      = 8;       // pixels per height level
+
+/* The four screen edges of a tile diamond, as a bitmask: +rx, +ry, -rx, -ry.
+   Going +rx moves down and right on screen, +ry down and left. Every piece of
+   edge artwork in the game is keyed by these. */
+var SCREEN_BIT = [8, 4, 2, 1];
 var MAX_Z   = 10;      // highest land level
 
 var ZOOMS   = [1, 2, 3, 4, 6, 8];   // device pixels per world pixel; 1 is the map view
@@ -120,7 +125,7 @@ var START_CASH = 10000;                         // what you start a park with
 var SAVE_KEY = 'finley-coaster-park', BEST_KEY = 'finley-coaster-best';
 var ARCHIVE_KEY = 'finley-coaster-park-v1-archive';
 var NOTICE_KEY = 'finley-coaster-v1-notice-seen';
-var SAVE_VERSION = 5;   // 1 single-coaster game, 2 no paths, 3 no rides, 4 no flat rides
+var SAVE_VERSION = 6;   // 1 single-coaster, 2 no paths, 3 no rides, 4 no flat rides, 5 no rivers
 
 var PAL = {
   vd:     '#16202a',   // void beyond the world
@@ -324,7 +329,8 @@ function diamondSpan(row) {                 // → [x0, width] for row 0..15
   return [14 - r * 2, 4 + r * 4];
 }
 
-var SPR = { grass: {}, sand: {}, water: {}, path: {}, face: {}, fence: {}, tree: [], deco: {}, track: {}, ship: {} };
+var SPR = { grass: {}, sand: {}, water: {}, path: {}, face: {}, fence: {}, tree: [], deco: {},
+            track: {}, ship: {}, river: {}, ripple: {}, arrow: {} };
 
 function tone3(hex, out, f) {
   var c = shadeHex(hex, f);
@@ -534,6 +540,120 @@ function pathSprite(kind, mask) {
   var key = kind + '|' + mask;
   if (!SPR.path[key]) SPR.path[key] = makePathTop(kind, mask, 4242);
   return SPR.path[key];
+}
+
+/* A river tile: dithered water with a bank down every screen edge that has no
+   water next door. The mask is the same kerb mask a path uses and the bits
+   mean the same thing, so there is one edge convention in the game rather
+   than two that drift apart. Sixteen of these, made once. */
+function makeRiverTop(mask, seed) {
+  var t = newCanvas(32, 22), g = t.g, rnd = mulberry32(seed + mask * 613);
+  var TOP = 6;                       // headroom above the diamond for the bank
+  for (var y = 0; y < 16; y++) {
+    var sp = diamondSpan(y), x0 = sp[0], x1 = sp[0] + sp[1] - 1;
+    for (var x = x0; x <= x1; x++) {
+      var v = rnd(), col = PAL.flow;
+      if (v < 0.16) col = PAL.water;
+      else if (v < 0.22) col = PAL.waterD;
+      g.fillStyle = col;
+      g.fillRect(x, y + TOP, 1, 1);
+    }
+    /* Which diamond edge each bit is. Going -rx moves up and left on screen
+       and -ry up and right, so the upper-left edge is SCREEN_BIT[2] and the
+       upper-right SCREEN_BIT[3] — the opposite way round from the pairing the
+       path kerbs use. On a path the difference is a shaded pixel nobody
+       looks at; on a channel it puts the bank between two squares of water
+       and leaves the outside open, which is unmistakable. */
+    var up = y < 8;
+    var leftBit  = up ? SCREEN_BIT[2] : SCREEN_BIT[1];
+    var rightBit = up ? SCREEN_BIT[3] : SCREEN_BIT[0];
+    if (mask & leftBit) {
+      g.fillStyle = PAL.dirtD; g.fillRect(x0, y + TOP, 2, 1);
+      g.fillStyle = PAL.grassD; g.fillRect(x0, y + TOP - 2, 2, 2);
+    }
+    if (mask & rightBit) {
+      g.fillStyle = PAL.dirtD; g.fillRect(x1 - 1, y + TOP, 2, 1);
+      g.fillStyle = PAL.grassD; g.fillRect(x1 - 1, y + TOP - 2, 2, 2);
+    }
+  }
+  return { c: t.c, oy: -TOP };
+}
+function riverSprite(mask) {
+  if (!SPR.river[mask]) SPR.river[mask] = makeRiverTop(mask, 8181);
+  return SPR.river[mask];
+}
+
+/* The ripple: a few pale dashes drifting the way the water goes. Four
+   directions by four frames, drawn as a transparent diamond so it can go
+   straight over the water with no clipping. Sixteen sprites, and one
+   drawImage a tile at run time — this can be two hundred tiles on a tablet,
+   so it is artwork, not a loop over pixels. */
+function makeRipple(dir, frame) {
+  var t = newCanvas(32, 16), g = t.g, rnd = mulberry32(dir * 71 + 17);
+  var step = frame / 4;
+  for (var i = 0; i < 7; i++) {
+    var u = rnd(), v = rnd();
+    // drift along the flow, wrapping within the tile
+    var a = (u + step * (dir === 0 || dir === 1 ? 1 : -1) + 2) % 1;
+    var sx = 4 + a * 24, sy = 2 + v * 12;
+    var run = (dir === 0 || dir === 2) ? 3 : 2;
+    var span = diamondSpan(Math.round(sy));
+    var lo = span[0] + 2, hi = span[0] + span[1] - 3;
+    if (sx < lo || sx + run > hi) continue;
+    g.fillStyle = PAL.flowL;
+    g.fillRect(Math.round(sx), Math.round(sy), run, 1);
+  }
+  return t.c;
+}
+function rippleSprite(dir, frame) {
+  var key = dir + '|' + frame;
+  if (!SPR.ripple[key]) SPR.ripple[key] = makeRipple(dir, frame);
+  return SPR.ripple[key];
+}
+
+/* Which way the water is going, said plainly: a chevron lying along the flow.
+   One sprite per screen direction, dropped on every fifth tile of the loop —
+   often enough to read the direction at a glance, rare enough not to turn the
+   channel into a runway. */
+var ARROW_INK = '#eaf4fb';
+function makeFlowArrow(dir) {
+  var t = newCanvas(32, 16), g = t.g;
+  // a tile step in screen pixels, scaled down to sit inside the diamond
+  var sx = dir === 0 ? 1 : dir === 2 ? -1 : 0;
+  var sy = dir === 1 ? 1 : dir === 3 ? -1 : 0;
+  var ax = (sx - sy) * 0.5, ay = (sx + sy) * 0.25;   // along
+  var px = -ay * 2, py = ax * 0.5;                   // across
+  var cx = 16, cy = 8;
+  g.fillStyle = ARROW_INK;
+  for (var s = -4; s <= 4; s++) {                    // the shaft
+    g.fillRect(Math.round(cx + ax * s), Math.round(cy + ay * s), 2, 1);
+  }
+  for (var b = 1; b <= 4; b++) {                     // two barbs off the head
+    var hx = cx + ax * 4, hy = cy + ay * 4;
+    g.fillRect(Math.round(hx - ax * b + px * b * 0.5), Math.round(hy - ay * b + py * b * 0.5), 2, 1);
+    g.fillRect(Math.round(hx - ax * b - px * b * 0.5), Math.round(hy - ay * b - py * b * 0.5), 2, 1);
+  }
+  return t.c;
+}
+function flowArrowSprite(dir) {
+  if (!SPR.arrow[dir]) SPR.arrow[dir] = makeFlowArrow(dir);
+  return SPR.arrow[dir];
+}
+
+/* The boarding deck: timber over the bank. */
+function makeDeck() {
+  var t = newCanvas(32, 16), g = t.g;
+  for (var y = 0; y < 16; y++) {
+    var sp = diamondSpan(y), x0 = sp[0], x1 = sp[0] + sp[1] - 1;
+    for (var x = x0; x <= x1; x++) {
+      g.fillStyle = ((x + y) % 6 < 3) ? PAL.wood : shadeHex(PAL.wood, 0.86);
+      g.fillRect(x, y, 1, 1);
+    }
+    g.fillStyle = PAL.woodD;
+    g.fillRect(x0, y, 1, 1);
+    g.fillRect(x1, y, 1, 1);
+  }
+  return t.c;
 }
 
 /* A ramp is the flat tile with every pixel lifted by how far along the rise it
@@ -841,6 +961,7 @@ function buildSprites() {
   SPR.deco.wet = makeMess('#8fa0b8');
   SPR.deco.litter = makeMess('#d8d2c0');
   SPR.deco.bin = makeBinSpr();
+  SPR.deco.deck = makeDeck();
   SPR.hut = {};
   for (var fi = 0; fi < FACILITY_TYPES.length; fi++) {
     var ft = FACILITY_TYPES[fi];
@@ -869,12 +990,19 @@ function newTile() {
     surface: 'grass', // 'grass' | 'sand'
     path: null,       // { type:'foot'|'queue' } once phase 2 lands
     object: null,     // scenery, facilities
-    rideId: null      // which ride occupies this tile
+    rideId: null,     // which ride occupies this tile
+    /* A channel cut by a drawn ride: { rideId, flow, mask }. Nothing to do
+       with `water` above — that is the terrain's own lakes and rivers, which
+       have a surface level, drown what is under them, and decide beaches and
+       bridges. This is a ride's own channel, sitting on ordinary ground at
+       ordinary ground height. The two layers never consult each other. */
+    river: null
   };
 }
 
 function isWater(t) { return !!t && t.water > t.h; }
 function surfaceLevel(t) { return isWater(t) ? t.water : t.h; }
+function isRiver(t) { return !!t && !!t.river; }
 
 /* Smooth value noise on a coarse lattice — enough for gentle countryside. */
 function makeNoise(seed, cells) {
@@ -1298,6 +1426,56 @@ function placeFacility(x, y, ft, plan) {
   };
 }
 
+/* ── drawing a river ────────────────────────────────────────────────────
+   A channel tile goes through the same ground validator as a station and a
+   footprint, plus one rule of its own: the whole loop runs at one height.
+   The ride's own channel is a silent no-op rather than a refusal, so
+   dragging back over what you have already drawn does nothing and says
+   nothing. */
+function riverLevel(ride) {
+  return ride && ride.river && ride.river.z !== null ? ride.river.z : null;
+}
+function riverPlan(ride, x, y) {
+  var t = tileAt(x, y);
+  if (!t) return { ok: false, why: 'OFF THE EDGE OF THE MAP' };
+  if (t.river) {
+    return t.river.rideId === (ride && ride.id)
+      ? { ok: false, why: 'ALREADY WATER', silent: true }
+      : { ok: false, why: 'ANOTHER RIVER IS THERE' };
+  }
+  var base = levelGroundPlan([{ x: x, y: y }]);
+  if (!base.ok) return { ok: false, why: base.why };
+  var z = riverLevel(ride);
+  if (z !== null && t.h !== z) {
+    return { ok: false, why: 'THE RIVER RUNS AT LEVEL ' + z + ' - THIS IS ' + t.h };
+  }
+  return { ok: true, cost: rideType('river').tileCost, z: t.h };
+}
+
+/* Four-connected, always. A drag bends once along its dominant axis, so it
+   cannot lay a diagonal step within itself — but the square it starts on can
+   sit corner to corner with what is already drawn, which in this projection
+   looks joined and is not. That is the case worth naming. */
+function riverTouches(ride, x, y, diagonal) {
+  var dx = diagonal ? [1, 1, -1, -1] : DX, dy = diagonal ? [1, -1, 1, -1] : DY;
+  for (var d = 0; d < 4; d++) {
+    var t = tileAt(x + dx[d], y + dy[d]);
+    if (t && t.river && t.river.rideId === ride.id) return true;
+  }
+  return false;
+}
+function riverStrokeFault(ride, tiles) {
+  if (!ride || !ride.river.cells.length || !tiles.length) return null;
+  var first = tiles[0];
+  if (riverTouches(ride, first.x, first.y, false)) return null;
+  var t0 = tileAt(first.x, first.y);
+  if (t0 && t0.river && t0.river.rideId === ride.id) return null;   // starting on itself
+  if (riverTouches(ride, first.x, first.y, true)) {
+    return 'CORNERS DO NOT JOIN - COME ROUND THE BEND';
+  }
+  return 'START FROM THE WATER YOU HAVE ALREADY CUT';
+}
+
 function landPlan(x, y) {
   var t = tileAt(x, y);
   if (!t) return { ok: false, why: 'OFF THE MAP' };
@@ -1343,6 +1521,7 @@ function planStroke() {
     if (build.tool.kind === 'path') plan = pathPlan(tl.x, tl.y, build.tool.pathType);
     else if (build.tool.kind === 'clear') plan = clearPlan(tl.x, tl.y);
     else if (build.tool.kind === 'facility') plan = facilityPlan(tl.x, tl.y, build.tool.facility);
+    else if (build.tool.kind === 'river') plan = riverPlan(build.ride, tl.x, tl.y);
     else plan = landPlan(tl.x, tl.y);
     plan.x = tl.x; plan.y = tl.y;
     st.plans.push(plan);
@@ -1354,6 +1533,18 @@ function planStroke() {
   st.nOk = nOk;
   build.cost = cost;
   build.ok = nOk > 0 && cost <= park.cash;
+
+  /* A stroke that does not join the water already cut is refused whole, and
+     the square it would have started on is the one tinted red — pointing at
+     the corner is the only way the rule reads as a rule rather than a bug. */
+  var fault = build.tool.kind === 'river' ? riverStrokeFault(build.ride, tiles) : null;
+  if (fault) {
+    build.ok = false;
+    for (var f = 0; f < st.plans.length; f++) { st.plans[f].ok = false; st.plans[f].silent = true; }
+    if (st.plans.length) { st.plans[0].why = fault; st.plans[0].silent = false; }
+    build.problem = { kind: 'place', text: fault };
+    return;
+  }
 
   build.problem = null;
   if (cost > park.cash) {
@@ -1383,6 +1574,12 @@ function commitStroke() {
     if (build.tool.kind === 'path') placePath(plan.x, plan.y, build.tool.pathType, plan);
     else if (build.tool.kind === 'clear') doClear(plan.x, plan.y);
     else if (build.tool.kind === 'facility') placeFacility(plan.x, plan.y, build.tool.facility, plan);
+    else if (build.tool.kind === 'river') {
+      // the ride comes into being with its first stretch of water, so backing
+      // out of the tool without drawing anything leaves nothing behind
+      if (!build.ride) build.ride = createDrawnRide('river');
+      placeRiverTile(build.ride, plan.x, plan.y);
+    }
     else { tileAt(plan.x, plan.y).owned = true; tileAt(plan.x, plan.y).forSale = false; }
     spent += plan.cost || 0;
     n++;
@@ -1396,6 +1593,12 @@ function commitStroke() {
   } else if (build.tool.kind === 'land') {
     park.owned = ownedCount();
     toast('BOUGHT ' + n + ' TILES FOR ' + money(spent));
+  } else if (build.tool.kind === 'river') {
+    if (build.ride) {
+      build.ride.spent = (build.ride.spent || 0) + spent;
+      remaskRiver(build.ride);
+      toast(build.ride.river.cells.length + ' TILES OF WATER - ' + money(spent));
+    }
   } else if (spent > 0) {
     toast(money(spent));
   }
@@ -1499,13 +1702,16 @@ function armed() { return !!build.tool; }
    drops back to its piece palette; a flat ride has none, and sending it to
    'track' would open a build window with no piece set behind it. */
 function doneWithDoors() {
-  build.mode = (build.ride && isFlat(build.ride)) ? null : 'track';
+  if (!build.ride) { build.mode = 'track'; return; }
+  build.mode = isFlat(build.ride) ? null : isDrawn(build.ride) ? 'river' : 'track';
 }
 /* What to tap, named after the thing the door hangs on. A flat ride has no
    station, and telling somebody to tap beside one is how a five-by-three
    footprint gets stared at. */
 function doorHint(which) {
-  var what = (build.ride && isFlat(build.ride)) ? 'THE RIDE' : 'THE STATION';
+  var what = !build.ride ? 'THE STATION'
+           : isDrawn(build.ride) ? 'THE PLATFORM'
+           : isFlat(build.ride) ? 'THE RIDE' : 'THE STATION';
   return 'TAP A TILE BY ' + what + ' FOR THE WAY ' + (which === 'entrance' ? 'IN' : 'OUT');
 }
 function armTool(id) { armToolObj(TOOLS[id] || null); }
@@ -1516,6 +1722,9 @@ function armToolObj(tool) {
   layoutUI();
 }
 function disarm() { build.tool = null; build.stroke = null; layoutUI(); }
+/* Put the drawing tool down without losing which ride is being worked on —
+   placing a platform is a tap, not a drag, and a live tool would eat it. */
+function disarmKeepingRide() { build.tool = null; build.stroke = null; }
 
 /* ═══════════════════════════ rides ═══════════════════════════
    RIDE_TYPES is a data table, not a set of branches. Every number the
@@ -1609,10 +1818,43 @@ var RIDE_TYPES = [
        past at any sane price, tame enough that the price can still be pushed
        past what it is worth — which is what the dull warning is for. */
     ratings: { excitement: 3.6, intensity: 5, nausea: 3.6 }
+  },
+  {
+    /* The first drawn ride. Not a chain of pieces and not a footprint: a loop
+       of channel tiles the player draws, on ordinary ground, at one height.
+       Tubes drift round it continuously — there is no lap to time and no
+       cycle to run, which is why its stall model watches for a tube that has
+       stopped moving instead. */
+    id: 'river', name: 'LAZY RIVER', family: 'WATER RIDES',
+    category: 'drawn', buildMode: 'draw', needsWater: false,
+    baseCost: 500, tileCost: 22, capacity: 2, weatherAffinity: 1,
+    dwell: 0, queueMax: 40,
+    loop: { min: 24, max: 200 },
+    flowSpeed: 0.6,        // tiles a second
+    tubeSpacing: 5,        // tiles of clear water between tubes
+    platformTiles: 2,
+    /* Low intensity, gentle on the stomach, and excitement on a curve that
+       flattens: 24 tiles gives 2.11, 100 gives 2.78, 200 gives 3.08. */
+    ratings: { exBase: 1.6, exGain: 2, exHalf: 70, intensity: 1.2, nausea: 0.4 }
   }
 ];
 function isFlatType(type) { return !!type && type.category === 'flat'; }
 function isFlat(ride) { return isFlatType(rideType(ride.typeId)); }
+function isDrawnType(type) { return !!type && type.category === 'drawn'; }
+function isDrawn(ride) { return isDrawnType(rideType(ride.typeId)); }
+
+/* A drawn ride states the shape of its ratings rather than the ratings
+   themselves: excitement climbs with the length of the loop and levels off,
+   so a river twice as long is better but nothing like twice as good, and
+   ringing the whole park with one is not the winning move. */
+function riverRatings(type, len) {
+  var R = type.ratings;
+  return {
+    excitement: R.exBase + R.exGain * (len / (len + R.exHalf)),
+    intensity: R.intensity,
+    nausea: R.nausea
+  };
+}
 function rideType(id) {
   for (var i = 0; i < RIDE_TYPES.length; i++) if (RIDE_TYPES[i].id === id) return RIDE_TYPES[i];
   return null;
@@ -1845,9 +2087,21 @@ function reclaimTiles(ride) {
       if (t) t.rideId = ride.id;
     }
   }
-  // a flat ride holds its ground by footprint, not by pieces; without this the
-  // sweep above would hand its tiles back to nobody
+  // a flat ride holds its ground by footprint and a drawn one by the water it
+  // cut; without these the sweep above hands their tiles back to nobody
   if (ride.footprint) claimFootprint(ride);
+  if (ride.river) {
+    for (var rc = 0; rc < ride.river.cells.length; rc++) {
+      var rt = tileAt(ride.river.cells[rc].x, ride.river.cells[rc].y);
+      if (rt) rt.rideId = ride.id;
+    }
+  }
+  if (ride.platform) {
+    for (var pc = 0; pc < ride.platform.cells.length; pc++) {
+      var pt2 = tileAt(ride.platform.cells[pc].x, ride.platform.cells[pc].y);
+      if (pt2) pt2.rideId = ride.id;
+    }
+  }
   if (ride.entranceTile) { var e = tileAt(ride.entranceTile.x, ride.entranceTile.y); if (e) e.rideId = ride.id; }
   if (ride.exitTile) { var x2 = tileAt(ride.exitTile.x, ride.exitTile.y); if (x2) x2.rideId = ride.id; }
 }
@@ -1859,7 +2113,10 @@ function doorReachable(tile) { return !!tile && reachable(tile.x, tile.y); }
 function canOpen(ride) {
   // a flat ride has no circuit to close and no lap to run: it is complete and
   // rated the moment it is placed, so those two refusals never apply to it
-  if (!ride.complete) return 'THE CIRCUIT IS NOT FINISHED';
+  if (isDrawn(ride)) {
+    if (!ride.complete) return 'THE LOOP IS NOT CLOSED: TAP EDIT';
+    if (!ride.platform) return 'IT NEEDS A BOARDING PLATFORM: TAP EDIT';
+  } else if (!ride.complete) return 'THE CIRCUIT IS NOT FINISHED';
   if (!ride.entranceTile) return 'IT NEEDS A WAY IN: TAP EDIT';
   if (!ride.exitTile) return 'IT NEEDS A WAY OUT: TAP EDIT';
   if (!ride.tested) return 'IT HAS NOT BEEN TESTED';
@@ -1976,6 +2233,9 @@ function deleteRide(ride) {
     var t = world.tiles[i];
     if (t.rideId === ride.id) {
       t.rideId = null;
+      // the channel goes with it, or the water stays cut into ground the game
+      // now believes is empty and will happily sell you again
+      if (t.river && t.river.rideId === ride.id) t.river = null;
       if (t.object && (t.object.type === 'rideEntrance' || t.object.type === 'rideExit')) t.object = null;
     }
   }
@@ -2126,6 +2386,175 @@ function createFlatRide(typeId, x, y, rot) {
   toast(ride.name + ' BUILT - NOW ADD A WAY IN AND OUT');
   return ride;
 }
+/* ── a drawn ride ───────────────────────────────────────────────────────
+   It owns tiles in the river layer rather than pieces or a footprint, and it
+   is not finished until those tiles are shown to form one closed loop. */
+function createDrawnRide(typeId) {
+  var type = rideType(typeId);
+  var ride = {
+    id: nextRideId++,
+    name: rideName(type),
+    typeId: typeId,
+    pieces: [],
+    footprint: null,
+    river: { cells: [], loop: null, z: null },
+    platform: null,
+    station: null, cursor: null,
+    complete: false,
+    entranceTile: null, exitTile: null,
+    status: 'building',
+    ratings: { excitement: 0, intensity: 0, nausea: 0 },
+    ticketPrice: 2,
+    queue: [], riders: [], tubes: [], stats: {}, spent: type.baseCost, tested: false
+  };
+  rides.push(ride);
+  park.cash -= type.baseCost;
+  park.books.building += type.baseCost;
+  toast(ride.name + ' STARTED - DRAW A LOOP AND CLOSE IT');
+  return ride;
+}
+
+function placeRiverTile(ride, x, y) {
+  var t = tileAt(x, y);
+  if (!t || t.river) return;
+  if (t.object && t.object.type === 'tree') t.object = null;
+  t.river = { rideId: ride.id, flow: 0, mask: 0 };
+  t.rideId = ride.id;
+  ride.river.cells.push({ x: x, y: y });
+  if (ride.river.z === null) ride.river.z = t.h;
+}
+
+/* Which of the four world directions have this ride's water next door. Stored
+   on the tile because the bank artwork is chosen from it every frame; the
+   screen-space version is worked out at draw time, the same way the fences
+   and the path kerbs do it. */
+function remaskRiver(ride) {
+  var cells = ride.river.cells;
+  for (var i = 0; i < cells.length; i++) {
+    var t = tileAt(cells[i].x, cells[i].y);
+    if (!t || !t.river) continue;
+    var mask = 0;
+    for (var d = 0; d < 4; d++) {
+      var nb = tileAt(cells[i].x + DX[d], cells[i].y + DY[d]);
+      if (nb && nb.river && nb.river.rideId === ride.id) mask |= (1 << d);
+    }
+    t.river.mask = mask;
+  }
+}
+function riverNeighbours(ride, x, y) {
+  var out = [];
+  for (var d = 0; d < 4; d++) {
+    var nb = tileAt(x + DX[d], y + DY[d]);
+    if (nb && nb.river && nb.river.rideId === ride.id) out.push({ x: x + DX[d], y: y + DY[d], d: d });
+  }
+  return out;
+}
+
+/* One closed loop, or a reason naming the square that spoils it. Every tile
+   with exactly two neighbours rules out dead ends, branches and crossings in
+   one test — a crossing has four, a fork three, an end one. What that test
+   cannot see is two separate rings, so the walk afterwards checks that going
+   round from one tile reaches all of them. */
+function validateRiverLoop(ride) {
+  var type = rideType(ride.typeId), cells = ride.river.cells, i;
+  if (cells.length < type.loop.min) {
+    return 'TOO SHORT: ' + cells.length + ' TILES OF ' + type.loop.min;
+  }
+  if (cells.length > type.loop.max) {
+    return 'TOO LONG: ' + cells.length + ' TILES, THE MOST IS ' + type.loop.max;
+  }
+  for (i = 0; i < cells.length; i++) {
+    var n = riverNeighbours(ride, cells[i].x, cells[i].y).length;
+    if (n === 2) continue;
+    var what = n < 2 ? (n === 0 ? 'JOINS NOTHING' : 'IS A DEAD END')
+                     : (n === 3 ? 'IS A FORK' : 'CROSSES ITSELF');
+    return cells[i].x + ',' + cells[i].y + ' ' + what + ' - A LOOP NEEDS TWO WAYS OUT';
+  }
+  // walk the ring from one tile and see whether it covers all of them
+  var order = walkRiver(ride, cells[0]);
+  if (order.length !== cells.length) {
+    var seen = {};
+    for (i = 0; i < order.length; i++) seen[order[i].x + ',' + order[i].y] = 1;
+    for (i = 0; i < cells.length; i++) {
+      if (!seen[cells[i].x + ',' + cells[i].y]) {
+        return cells[i].x + ',' + cells[i].y + ' IS ON A SECOND LOOP - MAKE IT ONE';
+      }
+    }
+  }
+  return null;
+}
+
+/* Round the ring once from a starting tile, never turning back on the tile
+   just left. Returns the tiles in order, which is also the order the flow
+   runs in and the order a tube visits them. */
+function walkRiver(ride, start) {
+  var order = [start], prev = null, cur = start;
+  for (var guard = 0; guard < rideType(ride.typeId).loop.max + 2; guard++) {
+    var ns = riverNeighbours(ride, cur.x, cur.y), next = null;
+    for (var i = 0; i < ns.length; i++) {
+      if (prev && ns[i].x === prev.x && ns[i].y === prev.y) continue;
+      next = ns[i];
+      break;
+    }
+    if (!next) break;
+    if (next.x === start.x && next.y === start.y) return order;
+    order.push({ x: next.x, y: next.y });
+    prev = cur;
+    cur = next;
+  }
+  return order;
+}
+
+/* Which way the water goes, set once from the walk: each tile points at the
+   one after it. */
+function setRiverFlow(ride, order) {
+  ride.river.loop = order;
+  for (var i = 0; i < order.length; i++) {
+    var here = order[i], next = order[(i + 1) % order.length];
+    var t = tileAt(here.x, here.y);
+    if (!t || !t.river) continue;
+    for (var d = 0; d < 4; d++) {
+      if (here.x + DX[d] === next.x && here.y + DY[d] === next.y) { t.river.flow = d; break; }
+    }
+    // every fifth square carries an arrow, so the marks are spaced along the
+    // water rather than scattered by where the loop happens to sit on the map
+    t.river.mark = (i % 5) === 0 ? 1 : 0;
+  }
+}
+
+/* Take the last tile back. The loop reopens if it was closed, because a ring
+   with a tile missing is a dead end at both ends and nothing should be able
+   to open while that is true. */
+function undoRiverTile(ride) {
+  var cells = ride.river.cells;
+  if (!cells.length) { toast('THERE IS NO WATER TO FILL IN'); return; }
+  if (ride.platform) { toast('THE PLATFORM IS ON IT - MOVE THAT FIRST'); return; }
+  var last = cells.pop();
+  var t = tileAt(last.x, last.y);
+  if (t) { t.river = null; t.rideId = null; }
+  park.cash += rideType(ride.typeId).tileCost;
+  ride.spent = Math.max(0, (ride.spent || 0) - rideType(ride.typeId).tileCost);
+  ride.complete = false;
+  ride.tested = false;
+  ride.river.loop = null;
+  if (ride.status === 'open') ride.status = 'closed';
+  if (!cells.length) ride.river.z = null;
+  remaskRiver(ride);
+}
+
+function closeRiver(ride) {
+  var why = validateRiverLoop(ride);
+  if (why) { toast(why); sfxDeny(); return false; }
+  remaskRiver(ride);
+  setRiverFlow(ride, walkRiver(ride, ride.river.cells[0]));
+  ride.complete = true;
+  ride.tested = true;
+  ride.ratings = riverRatings(rideType(ride.typeId), ride.river.loop.length);
+  if (ride.status === 'building') ride.status = 'closed';
+  sfxGood();
+  return true;
+}
+
 function claimFootprint(ride) {
   var cells = ride.footprint.cells;
   for (var i = 0; i < cells.length; i++) {
@@ -2140,7 +2569,58 @@ function claimFootprint(ride) {
    whether "it" is a four-tile station or a five-by-three footprint. Strictly
    the four edges — a tile touching only at a corner looks joined at this
    angle and is not, which is the trap the door tints exist to show. */
+/* ── the boarding platform ──────────────────────────────────────────────
+   A short run of bank against the water, laid along the way the river runs
+   so tubes come alongside it rather than at it. The tapped square is the
+   first of the run; the second follows the flow. */
+function platformPlan(ride, x, y) {
+  if (!ride.river || !ride.river.loop) return { ok: false, why: 'CLOSE THE LOOP FIRST' };
+  var touching = riverNeighbours(ride, x, y);
+  if (!touching.length) return { ok: false, why: 'THE PLATFORM GOES AGAINST THE WATER' };
+  var base = levelGroundPlan([{ x: x, y: y }]);
+  if (!base.ok) return { ok: false, why: base.why };
+  if (base.z !== ride.river.z) {
+    return { ok: false, why: 'THE PLATFORM SITS AT THE LEVEL OF THE WATER' };
+  }
+  /* The run goes alongside the water, following it. A square can touch the
+     river on two sides at once — the inside of a bend does — and only one of
+     them may have a straight stretch to lie along, so every one it touches
+     is tried before giving up. */
+  var loop = ride.river.loop;
+  for (var n = 0; n < touching.length; n++) {
+    var board = touching[n], bt = tileAt(board.x, board.y);
+    var at = -1;
+    for (var i = 0; i < loop.length; i++) {
+      if (loop[i].x === board.x && loop[i].y === board.y) { at = i; break; }
+    }
+    if (at < 0) continue;
+    var after = loop[(at + 1) % loop.length];
+    var nx = x + (after.x - board.x), ny = y + (after.y - board.y);
+    var second = levelGroundPlan([{ x: nx, y: ny }]);
+    if (!second.ok || second.z !== ride.river.z) continue;
+    if (!riverNeighbours(ride, nx, ny).length) continue;
+    return { ok: true, cost: 0, cells: [{ x: x, y: y }, { x: nx, y: ny }], board: at };
+  }
+  return { ok: false, why: 'IT NEEDS TWO CLEAR SQUARES ALONG A STRAIGHT STRETCH' };
+}
+function placePlatform(ride, plan) {
+  if (ride.platform) {                       // moving it: give the old bank back
+    for (var o = 0; o < ride.platform.cells.length; o++) {
+      var ot = tileAt(ride.platform.cells[o].x, ride.platform.cells[o].y);
+      if (ot && !ot.river) ot.rideId = null;
+    }
+  }
+  ride.platform = { cells: plan.cells, board: plan.board };
+  for (var i = 0; i < plan.cells.length; i++) {
+    var t = tileAt(plan.cells[i].x, plan.cells[i].y);
+    if (!t) continue;
+    if (t.object && t.object.type === 'tree') t.object = null;
+    t.rideId = ride.id;
+  }
+}
+
 function rideEdgeCells(ride) {
+  if (isDrawn(ride)) return ride.platform ? ride.platform.cells : [];
   if (isFlat(ride)) return ride.footprint.cells;
   var def = pieceDef(ride, 'station'), out = [];
   for (var i = 0; i < def.tiles; i++) {
@@ -3158,6 +3638,7 @@ function operateRides(dt) {
        the block gap, the integrator, the station dispatch — is about a
        vehicle on a track, and none of it applies. */
     if (isFlat(ride)) { stepFlatRide(ride, dt); continue; }
+    if (isDrawn(ride)) { stepDrawnRide(ride, dt); continue; }
     if (ride.dwell > 0) ride.dwell -= dt;
     // the same two substeps the test lap uses: at one full step the integrator
     // loses enough speed on a climb that a ride can pass its test and then
@@ -3247,6 +3728,70 @@ function stepFlatRide(ride, dt) {
     default:
       ride.phase = 'load'; ride.phaseT = 0;
   }
+}
+
+/* ── the drawn-ride drift ───────────────────────────────────────────────
+   No cycle and no lap: tubes go on the water as fast as the queue fills them
+   and come off a loop later. Everything here is measured in tiles travelled
+   rather than in indices, because that is what both the spacing rule and
+   "has it been all the way round" actually want to know. */
+function stepDrawnRide(ride, dt) {
+  var type = rideType(ride.typeId);
+  if (!ride.complete || !ride.river.loop || !ride.platform) return;
+  var len = ride.river.loop.length;
+  var tubes = ride.tubes;
+
+  // oldest first, so each tube sees where the one ahead already is this frame
+  for (var i = 0; i < tubes.length; i++) {
+    var tube = tubes[i], ahead = tubes[i - 1];
+    var gap = ahead ? ahead.gone - tube.gone : Infinity;
+    /* A tube that has been all the way round waits at the platform to be
+       emptied rather than setting off again. That is what makes the drift
+       model able to see the one thing that can go wrong here: if the riders
+       cannot be set down, the tube stops, and everything behind it stops. */
+    var held = gap < type.tubeSpacing || tube.gone >= len;
+    if (!held) {
+      var step = type.flowSpeed * dt;
+      tube.gone += step;
+      tube.t += step;
+      while (tube.t >= 1) { tube.t -= 1; tube.at = (tube.at + 1) % len; tube.driftT = 0; }
+    }
+    tube.driftT += dt;
+  }
+
+  /* The stall this ride can actually have: the tube at the front cannot get
+     off, so it sits on the platform and every tube behind it stacks up. The
+     drift model is what notices — there is no lap time to run out. */
+  var front = tubes[0];
+  if (front && front.driftT > stallModel(type).after && !ride.stalled) {
+    ride.stalled = true;
+    ride.status = 'closed';
+    sfxBad();
+    toast(ride.name + ': THE WATER IS NOT MOVING');
+    layoutUI();
+  }
+
+  // a tube that has been the whole way round comes off at the platform
+  while (tubes.length && tubes[0].gone >= len) {
+    if (!unloadRiders(ride, tubes[0].riders, false)) { holdRiders(ride); break; }
+    tubes.shift();
+  }
+
+  if (ride.status !== 'open' || !ride.queue.length) return;
+  // continuous dispatch: a tube goes the moment there is somebody to put in it
+  // and the water by the platform is clear
+  var last = tubes[tubes.length - 1];
+  if (last && last.gone < type.tubeSpacing) return;
+  var riders = boardRiders(ride, Math.min(type.capacity, ride.queue.length));
+  if (!riders.length) return;
+  tubes.push({ at: ride.platform.board, t: 0, gone: 0, driftT: 0, riders: riders });
+}
+
+/* How long a lap of the water takes, which is also how long a guest is aboard
+   and away from a toilet. */
+function riverRideSeconds(ride) {
+  var type = rideType(ride.typeId);
+  return ride.river && ride.river.loop ? ride.river.loop.length / type.flowSpeed : 0;
 }
 
 /* Where the boat is at this instant, in degrees off vertical. The envelope
@@ -3826,7 +4371,30 @@ function layoutUI() {
 
   // construction window: piece palette, build, undo. Lives in the window
   // manager, so it drags around like everything else.
-  if (build.mode === 'track' && build.ride && !isFlat(build.ride)) {
+  /* Drawing a river: the tool stays armed and the window carries the state of
+     the loop — how much water there is, and whether it closes. */
+  if (build.mode === 'river' && build.rideType) {
+    var rw3 = findWin('river');
+    if (!rw3) {
+      rw3 = openWinRaw({ id: 'river', title: 'DIG THE RIVER', w: 150, h: 86,
+                         x: 8, y: Math.max(20, uiH - 150), draw: drawRiverWinBody });
+    }
+    buttons.push({ id: 'rv_close', x: rw3.x + 5, y: rw3.y + rw3.h - 46, w: 74, h: 18,
+                   label: 'CLOSE LOOP' });
+    buttons.push({ id: 'rv_undo', x: rw3.x + 83, y: rw3.y + rw3.h - 46, w: 60, h: 18,
+                   label: 'UNDO' });
+    buttons.push({ id: 'rv_platform', x: rw3.x + 5, y: rw3.y + rw3.h - 24, w: 74, h: 18,
+                   label: 'PLATFORM', on: !!(build.ride && build.ride.platform) });
+    buttons.push({ id: 'rv_done', x: rw3.x + 83, y: rw3.y + rw3.h - 24, w: 60, h: 18,
+                   label: 'DONE' });
+  } else if (findWin('river')) {
+    closeWinQuiet('river');
+  }
+  if (build.mode === 'platform') {
+    buttons.push({ id: 'plat_cancel', x: uiW - 64, y: 19, w: 60, h: 18, label: 'LATER' });
+  }
+
+  if (build.mode === 'track' && build.ride && !isFlat(build.ride) && !isDrawn(build.ride)) {
     var bw = findWin('build');
     if (!bw) {
       bw = openWinRaw({ id: 'build', title: 'BUILD TRACK', w: 128, h: 138,
@@ -4014,6 +4582,29 @@ function rideAction(act, ride) {
         toast(build.mode === 'exit' ? 'NOW THE WAY OUT' : doorHint('entrance'));
         break;
       }
+      /* A drawn ride goes back to whichever step it is actually stuck on:
+         still digging, no platform yet, or only the doors left. */
+      if (isDrawn(ride)) {
+        build.rideType = rideType(ride.typeId);
+        build.cat = null;
+        if (!ride.complete) {
+          build.mode = 'river';
+          armToolObj({ id: 'river_draw', cat: 'RIDES', kind: 'river', drag: 'line',
+                       tint: '#48b6e8', hint: 'DRAG TO CUT THE CHANNEL' });
+          build.mode = 'river';
+          toast('DRAG TO CUT THE CHANNEL');
+        } else if (!ride.platform) {
+          build.mode = 'platform';
+          disarmKeepingRide();
+          toast('TAP THE BANK WHERE PEOPLE GET IN');
+        } else {
+          build.mode = !ride.entranceTile ? 'entrance' : !ride.exitTile ? 'exit' : 'entrance';
+          build.doorOnly = !!(ride.entranceTile && ride.exitTile);
+          disarmKeepingRide();
+          toast(build.mode === 'exit' ? 'NOW THE WAY OUT' : doorHint('entrance'));
+        }
+        break;
+      }
       /* Door placing is only ever entered the moment the circuit closes, and
          nothing remembers it across a reload — so a ride left without its
          doors could never be given any, and never open. Resume at the step
@@ -4059,7 +4650,16 @@ function pressButton(b) {
     build.ride = null;
     build.station = null;
     build.flat = null;
-    if (isFlatType(rt)) {
+    if (isDrawnType(rt)) {
+      /* Armed like a path tool, because that is what drawing it is. The ride
+         itself does not exist until the first stretch of water is cut. */
+      build.mode = 'river';
+      armToolObj({ id: 'river_draw', cat: 'RIDES', kind: 'river', drag: 'line',
+                   tint: '#48b6e8', hint: 'DRAG TO CUT THE CHANNEL' });
+      build.mode = 'river';                    // armToolObj clears it
+      build.rideType = rt;
+      toast('DRAG TO CUT THE CHANNEL');
+    } else if (isFlatType(rt)) {
       build.mode = 'flat';
       build.flat = { x: null, y: null, rot: rt.footprint.rotations[0] };
       toast('TAP WHERE IT GOES - TURN SWINGS IT ROUND');
@@ -4161,6 +4761,38 @@ function pressButton(b) {
       break;
     case 'fl_cancel':
       build.mode = null; build.flat = null; build.rideType = null;
+      layoutUI();
+      break;
+    case 'rv_close':
+      if (!build.ride) { toast('CUT SOME WATER FIRST'); break; }
+      if (closeRiver(build.ride)) {
+        toast('THE LOOP IS CLOSED - NOW A PLATFORM');
+        build.mode = 'platform';
+        disarmKeepingRide();
+      }
+      layoutUI();
+      break;
+    case 'rv_undo':
+      if (build.ride) undoRiverTile(build.ride);
+      layoutUI();
+      break;
+    case 'rv_platform':
+      if (!build.ride || !build.ride.complete) { toast('CLOSE THE LOOP FIRST'); break; }
+      build.mode = 'platform';
+      disarmKeepingRide();
+      toast('TAP THE BANK WHERE PEOPLE GET IN');
+      layoutUI();
+      break;
+    case 'rv_done':
+      build.mode = null; build.rideType = null; build.ride = null;
+      disarm();
+      break;
+    case 'plat_cancel':
+      build.mode = build.ride && !build.ride.complete ? 'river' : null;
+      if (build.mode === 'river') armToolObj({ id: 'river_draw', cat: 'RIDES', kind: 'river',
+                                               drag: 'line', tint: '#48b6e8',
+                                               hint: 'DRAG TO CUT THE CHANNEL' });
+      build.mode = build.mode || null;
       layoutUI();
       break;
     case 'door_skip':
@@ -4270,6 +4902,23 @@ function drawWorld(g) {
         g.drawImage(sg, sx + 16 - (sg.width >> 1), sy + 8 - sg.height + 3);
       }
 
+      /* A ride's channel, cut into ordinary ground. Drawn straight after the
+         terrain and before everything that stands on it, exactly where a
+         path goes, because that is what it is: a surface. */
+      if (t.river) {
+        var rmask = 0;
+        for (var re = 0; re < 4; re++) {                 // world mask → screen edges
+          if (!(t.river.mask & (1 << ((re + cam.rot) % 4)))) rmask |= SCREEN_BIT[re];
+        }
+        var rspr = riverSprite(rmask);
+        g.drawImage(rspr.c, sx, sy + rspr.oy);
+        if (!far) {
+          var sdir = (t.river.flow - cam.rot + 4) % 4;
+          g.drawImage(rippleSprite(sdir, ui.waterFrame), sx, sy);
+          if (t.river.mark) g.drawImage(flowArrowSprite(sdir), sx, sy);
+        }
+      }
+
       // paths sit at their own level, which is how bridges clear the water
       if (t.path) {
         var psy = (rx + ry) * HH - t.path.level * ZH + cam.y;
@@ -4292,8 +4941,14 @@ function drawWorld(g) {
       var tk = trackMap[w.x + ',' + w.y];
       if (tk) for (var ti = 0; ti < tk.length; ti++) drawPiece(g, tk[ti].set, tk[ti].p);
 
+      var deck = deckMap[w.x + ',' + w.y];
+      if (deck) g.drawImage(SPR.deco.deck, sx, sy);
+
       var flats = flatMap[w.x + ',' + w.y];
       if (flats) for (var fi = 0; fi < flats.length; fi++) drawFlatRide(g, flats[fi]);
+
+      var tubes = tubeMap[w.x + ',' + w.y];
+      if (tubes && !far) for (var ti2 = 0; ti2 < tubes.length; ti2++) drawTube(g, tubes[ti2]);
 
       var folk = guestMap[w.x + ',' + w.y];
       if (folk) for (var fi2 = 0; fi2 < folk.length; fi2++) drawGuest(folk[fi2], g);
@@ -4337,7 +4992,6 @@ function drawWorld(g) {
   }
 }
 
-var SCREEN_BIT = [8, 4, 2, 1];      // +rx, +ry, -rx, -ry
 function screenNeighbour(rx, ry, e) {
   var nx = rx + (e === 0 ? 1 : e === 2 ? -1 : 0);
   var ny = ry + (e === 1 ? 1 : e === 3 ? -1 : 0);
@@ -4416,6 +5070,58 @@ var SHIP_DEEP  = 1.5;    // levels from the rail down to the keel
 var SHIP_FOOT  = 1.7;    // tiles along the swing plane to the foot of a leg
 var SHIP_SIDE  = 0.95;   // tiles across it to each frame
 var LEVELS_PER_TILE = 2; // a tile is three metres across, a level one and a half
+
+/* Tubes and boarding decks, held by tile the way cars and guests are. A tube
+   sits between two river squares, so it takes the one it is leaving — the
+   same square its water is drawn on. */
+var tubeMap = {}, deckMap = {};
+function buildTubeMap() {
+  tubeMap = {}; deckMap = {};
+  for (var r = 0; r < rides.length; r++) {
+    var ride = rides[r];
+    if (ride.platform) {
+      for (var p = 0; p < ride.platform.cells.length; p++) {
+        deckMap[ride.platform.cells[p].x + ',' + ride.platform.cells[p].y] = 1;
+      }
+    }
+    if (!ride.tubes || !ride.river || !ride.river.loop) continue;
+    var loop = ride.river.loop;
+    for (var i = 0; i < ride.tubes.length; i++) {
+      var tube = ride.tubes[i];
+      var here = loop[tube.at % loop.length];
+      var next = loop[(tube.at + 1) % loop.length];
+      var key = here.x + ',' + here.y;
+      (tubeMap[key] || (tubeMap[key] = [])).push({ from: here, to: next, t: tube.t,
+                                                   riders: tube.riders.length });
+    }
+  }
+}
+function drawTube(g, tube) {
+  // slide between the middle of one square and the middle of the next
+  var fx = tube.from.x + (tube.to.x - tube.from.x) * tube.t;
+  var fy = tube.from.y + (tube.to.y - tube.from.y) * tube.t;
+  var t0 = tileAt(tube.from.x, tube.from.y);
+  var rx = rotX(fx, fy), ry = rotY(fx, fy);
+  var cx = Math.round((rx - ry) * HW + cam.x + HW);
+  var cy = Math.round((rx + ry) * HH - (t0 ? t0.h : 0) * ZH + cam.y + HH);
+
+  // a ring, seen from above: a squashed circle with a hole in it
+  for (var a = 0; a < 16; a++) {
+    var th = a / 16 * Math.PI * 2;
+    var px = Math.round(cx + Math.cos(th) * 5);
+    var py = Math.round(cy + Math.sin(th) * 2.5);
+    g.fillStyle = a > 4 && a < 12 ? '#c8562e' : '#e0703c';
+    g.fillRect(px, py, 2, 2);
+  }
+  g.fillStyle = PAL.flowL;
+  g.fillRect(cx - 2, cy - 1, 4, 2);
+  for (var i = 0; i < tube.riders; i++) {
+    g.fillStyle = SHIRTS[(i * 3) % SHIRTS.length];
+    g.fillRect(cx - 2 + i * 3, cy - 3, 2, 3);
+    g.fillStyle = SKINS[i % SKINS.length];
+    g.fillRect(cx - 2 + i * 3, cy - 5, 2, 2);
+  }
+}
 
 var flatMap = {};
 function buildFlatMap() {
@@ -4703,6 +5409,29 @@ function drawDoorHints(g) {
 }
 
 function drawTrackGhost(g) {
+  /* Placing the platform: green on every square of bank that would take it,
+     so the two-square run and the corner rule are visible before the tap
+     rather than explained after it. */
+  if (build.mode === 'platform' && build.ride) {
+    var seen = {}, cells = build.ride.river.cells;
+    for (var pi = 0; pi < cells.length; pi++) {
+      for (var pd = 0; pd < 4; pd++) {
+        var bx2 = cells[pi].x + DX[pd], by2 = cells[pi].y + DY[pd];
+        var key2 = bx2 + ',' + by2;
+        if (seen[key2]) continue;
+        seen[key2] = 1;
+        var bt2 = tileAt(bx2, by2);
+        if (!bt2 || bt2.river) continue;
+        var pOk = platformPlan(build.ride, bx2, by2).ok;
+        if (!pOk && !levelGroundPlan([{ x: bx2, y: by2 }]).ok) continue;
+        var prx = rotX(bx2, by2), pry = rotY(bx2, by2);
+        drawTileOutline(g, (prx - pry) * HW + cam.x,
+                           (prx + pry) * HH - surfaceLevel(bt2) * ZH + cam.y,
+                           pOk ? PAL.ghostOK : PAL.ghostNo);
+      }
+    }
+    return;
+  }
   /* The footprint under the finger, tile by tile: red on every square that
      refuses it, so a five-by-three that fails on one corner says which. */
   if (build.mode === 'flat' && build.flat && build.flat.x !== null && build.rideType) {
@@ -4910,6 +5639,29 @@ function openRatingsWin(ride) {
       if (warn) text(g, warn, x, y, '#7a1f18');
     }
   });
+}
+
+function drawRiverWinBody(g, win) {
+  var ride = build.ride, type = build.rideType;
+  var n = ride ? ride.river.cells.length : 0;
+  text(g, n + ' TILES OF WATER', win.x + 5, win.y + 17, PAL.uiText);
+  textRight(g, money(type.tileCost) + ' EACH', win.x + win.w - 5, win.y + 17, PAL.uiDim);
+
+  var line, ink = PAL.uiDim;
+  if (!ride) line = 'DRAG TO CUT THE CHANNEL';
+  else if (ride.complete) {
+    line = ride.platform ? 'READY - GIVE IT DOORS'
+                         : 'LOOP CLOSED - NOW A PLATFORM';
+    ink = '#12401c';
+  } else if (n < type.loop.min) {
+    line = 'AT LEAST ' + type.loop.min + ' TILES FOR A LOOP';
+  } else {
+    line = 'BRING IT ROUND AND CLOSE IT';
+  }
+  var lines = wrapText(line, Math.floor((win.w - 10) / ADV));
+  for (var i = 0; i < Math.min(2, lines.length); i++) {
+    text(g, lines[i], win.x + 5, win.y + 28 + i * 9, ink);
+  }
 }
 
 function drawBuildWinBody(g, win) {
@@ -5344,6 +6096,7 @@ function render() {
   buildGuestMap();
   buildSplashMap();
   buildFlatMap();
+  buildTubeMap();
   drawWorld(bctx);
   drawThoughts(bctx);
   drawStrokeGhost(bctx);
@@ -5560,6 +6313,18 @@ function tap(b, uiPt) {
     build.flat.x = t.x; build.flat.y = t.y;
     return;
   }
+  if (build.mode === 'platform' && build.ride) {
+    if (!t) { toast('THAT IS OFF THE MAP'); return; }
+    var pplan = platformPlan(build.ride, t.x, t.y);
+    if (!pplan.ok) { toast(pplan.why); sfxDeny(); return; }
+    placePlatform(build.ride, pplan);
+    sfxBuild();
+    build.mode = !build.ride.entranceTile ? 'entrance' : !build.ride.exitTile ? 'exit' : null;
+    toast(build.mode ? doorHint(build.mode) : 'PLATFORM MOVED');
+    layoutUI();
+    saveGame();
+    return;
+  }
   if ((build.mode === 'entrance' || build.mode === 'exit') && build.ride) {
     if (!t) return;
     var plan = doorPlan(build.ride, t.x, t.y);
@@ -5687,7 +6452,7 @@ function checkHints() {
    at, so a save from an older schema can never half-load. */
 
 function serialise() {
-  var h = [], w = [], own = [], sale = [], surf = [], objs = [], paths = [];
+  var h = [], w = [], own = [], sale = [], surf = [], objs = [], paths = [], rivers = [];
   for (var i = 0; i < world.tiles.length; i++) {
     var t = world.tiles[i];
     h.push(t.h); w.push(t.water);
@@ -5699,11 +6464,17 @@ function serialise() {
         : [i, t.object.type, t.object.v || 0]);
     }
     if (t.path) paths.push([i, t.path.type, t.path.level, t.path.bridge ? 1 : 0]);
+    /* The channel is state in its own right, not something derivable from the
+       ride: which ride cut it and which way it runs. The neighbour mask is
+       worked out again on load, because it is only ever a cache of what the
+       four squares around it already say. */
+    if (t.river) rivers.push([i, t.river.rideId, t.river.flow]);
   }
   return {
     v: SAVE_VERSION,
     world: WORLD,
     h: h, water: w, owned: own, sale: sale, surf: surf, objects: objs, paths: paths,
+    rivers: rivers,
     entrance: world.entrance,
     park: { cash: park.cash, day: park.day, month: park.month, year: park.year,
             rating: park.rating, entryFee: park.entryFee,
@@ -5726,6 +6497,11 @@ function serialiseRides() {
          cells are worked out again on load from the middle and the turn, so
          only those three numbers are written. */
       footprint: r.footprint ? { x: r.footprint.x, y: r.footprint.y, rot: r.footprint.rot } : null,
+      /* A drawn ride keeps only what cannot be worked out again: where its
+         platform sits. The channel itself is in the tile layer, and the ring
+         order is a walk of it. */
+      platform: r.platform ? { cells: r.platform.cells, board: r.platform.board } : null,
+      drawn: isDrawn(r) ? 1 : 0,
       station: r.station, cursor: r.cursor, complete: r.complete,
       entranceTile: r.entranceTile, exitTile: r.exitTile,
       status: r.status, ratings: r.ratings, ticketPrice: r.ticketPrice,
@@ -5767,12 +6543,51 @@ function restoreRides(saved) {
       r.riders = [];
       r.phase = 'load'; r.phaseT = 0; r.cycleT = 0;
     }
+    /* A drawn ride comes back with nobody on the water: tubes mid-loop are
+       not saved, and resuming one from a stale position would be a ring of
+       ghosts. Its channel is gathered from the tile layer, which is where it
+       lives, and the ring order is walked again from it. */
+    if (d.drawn) {
+      r.river = { cells: [], loop: null, z: null };
+      r.platform = d.platform || null;
+      r.tubes = [];
+      r.riders = [];
+    }
     rides.push(r);
     for (var p = 0; p < d.pieces.length; p++) {
       var pc = d.pieces[p];
       addPiece(r, pc[0], pc[1], pc[2], pc[3], pc[4]);
     }
     reclaimTiles(r);
+  }
+  restoreRivers();
+}
+
+/* Gather each drawn ride's channel out of the tile layer, then walk it. A
+   ride whose loop no longer closes comes back mid-build rather than open,
+   which is the same state the builder would have left it in. */
+function restoreRivers() {
+  var byId = {}, i;
+  for (i = 0; i < rides.length; i++) if (rides[i].river) byId[rides[i].id] = rides[i];
+  for (i = 0; i < world.tiles.length; i++) {
+    var t = world.tiles[i];
+    if (!t.river) continue;
+    var ride = byId[t.river.rideId];
+    if (!ride) { t.river = null; continue; }        // channel with no ride behind it
+    ride.river.cells.push({ x: i % WORLD, y: (i / WORLD) | 0 });
+    if (ride.river.z === null) ride.river.z = t.h;
+    t.rideId = ride.id;
+  }
+  for (var k in byId) {
+    var r2 = byId[k];
+    remaskRiver(r2);
+    if (!r2.river.cells.length) continue;
+    if (validateRiverLoop(r2)) { r2.complete = false; r2.tested = false; r2.status = 'building'; continue; }
+    r2.river.loop = walkRiver(r2, r2.river.cells[0]);
+    setRiverFlow(r2, r2.river.loop);
+    r2.complete = true;
+    r2.tested = true;
+    r2.ratings = riverRatings(rideType(r2.typeId), r2.river.loop.length);
   }
 }
 
@@ -5797,7 +6612,14 @@ function migrate(save) {
        5, and one that predates flat rides is stepped up rather than refused. */
     save.v = 5;
   }
-  // future: if (save.v === 5) { ...upgrade to 6...; save.v = 6; }
+  if (save.v === 5) {                             // 5 → 6: the river layer arrived
+    /* The layer starts empty, which is what a park with no drawn rides in it
+       means. Written out rather than left undefined so applySave has one
+       shape to read and no branch for old saves. */
+    save.rivers = [];
+    save.v = 6;
+  }
+  // future: if (save.v === 6) { ...upgrade to 7...; save.v = 7; }
   if (save.v !== SAVE_VERSION) return null;
   if (save.world !== WORLD) return null;          // world resized under it
   if (!save.h || save.h.length !== WORLD * WORLD) return null;
@@ -5829,6 +6651,11 @@ function applySave(save) {
   for (i = 0; i < savedPaths.length; i++) {
     var pth = savedPaths[i];
     world.tiles[pth[0]].path = { type: pth[1], level: pth[2], bridge: !!pth[3] };
+  }
+  var savedRivers = save.rivers || [];
+  for (i = 0; i < savedRivers.length; i++) {
+    var rv = savedRivers[i];
+    world.tiles[rv[0]].river = { rideId: rv[1], flow: rv[2], mask: 0 };
   }
   world.entrance = save.entrance || { x: WORLD >> 1, y: WORLD >> 1 };
   park.cash = save.park.cash;
