@@ -2231,6 +2231,7 @@ function startRun(ride, mode) {
   sim.active = true;
   sim.state = 'running';
   sim.s = 0.01; sim.v = P.liftSpeed; sim.t = 0; sim.rollT = 0;
+  sim.lastPiece = undefined;      // a piece index from the last ride tested is meaningless here
   sim.follow = sim.mode === 'test';
   sim.why = '';
   sim.stats = { top: 0, maxG: -99, minG: 99, maxLat: 0, air: 0, time: 0 };
@@ -2255,6 +2256,7 @@ function stepSim(dt) {
   var set = rideType(ride.typeId).pieceSet;
   var st = sampleAt(sim.s);
   var def = PIECE_SETS[set][ride.pieces[st.owner].type];
+  checkSplash(ride, sim, st.owner, st, sim.v);
 
   // the chain only pulls a train that is still going forwards, or one that
   // cannot climb shuffles back and forth for ever instead of failing
@@ -2301,11 +2303,13 @@ function saveBest() {
 
 /* ── the train ── */
 
-function projectWorld(ride, mx, my, mz) {
-  var P = ridePhysics(ride);
-  var tx = mx / P.tileMetres, ty = my / P.tileMetres, lz = mz / P.levelMetres;
+function projectPoint(tx, ty, lz) {
   var rx = rotX(tx, ty), ry = rotY(tx, ty);
   return { sx: (rx - ry) * HW + cam.x + HW, sy: (rx + ry) * HH - lz * ZH + cam.y + HH };
+}
+function projectWorld(ride, mx, my, mz) {
+  var P = ridePhysics(ride);
+  return projectPoint(mx / P.tileMetres, my / P.tileMetres, mz / P.levelMetres);
 }
 function projectDir(tx, ty, lz) {
   var drx, dry;
@@ -2362,6 +2366,117 @@ function addCars(ride, path, s, riders) {
     var full = riders < 0 || (i * cap / P.cars) < riders;
     (carMap[key] || (carMap[key] = [])).push({ st: st, i: i, ride: ride, full: full });
   }
+}
+
+/* ── splashes ──────────────────────────────────────────────────────────
+   A boat reaching the foot of a drop throws water. This is decoration and
+   nothing else: the sim never reads it, it is never saved, and once thrown
+   a droplet lives in screen pixels rather than metres, because it is not
+   riding anything. Each splash holds the tile it stands on so it can be
+   drawn in the same depth order as the boat that made it. */
+var splashes = [];
+var SPLASH_MAX = 24;          // enough for a boat on the drop of every flume
+var SPLASH_G = 130;           // droplet gravity, screen pixels per second²
+
+/* The foot of a drop is where the channel levels out: the piece behind sloped
+   down and the one underneath does not. Only water rides splash, so this asks
+   the piece for its trough rather than the ride for its name. A piece can be
+   pulled up while a boat is still on the track, hence the check that both ends
+   of the transition are still there. */
+function checkSplash(ride, run, owner, st, v) {
+  var was = run.lastPiece;
+  run.lastPiece = owner;
+  if (was === undefined || was === owner) return;
+  if (!ride.pieces[was] || !ride.pieces[owner]) return;
+  var set = PIECE_SETS[rideType(ride.typeId).pieceSet];
+  var from = set[ride.pieces[was].type], to = set[ride.pieces[owner].type];
+  if (!from.channel || !(from.slope < 0)) return;
+  if ((to.slope || 0) < 0) return;                // still on the way down
+  spawnSplash(ride, st, v, -from.slope);
+}
+
+function spawnSplash(ride, st, v, drop) {
+  var P = ridePhysics(ride);
+  // how hard it landed: the speed it arrived at, weighted by the steepness
+  var force = clamp(Math.abs(v) / 7 * (0.55 + drop * 0.3), 0, 1.4);
+  if (force < 0.28) return;                       // a boat trickling down makes none
+  var n = 5 + Math.round(force * 9), drops = [];
+  for (var i = 0; i < n; i++) {
+    var side = Math.random() < 0.5 ? -1 : 1;
+    drops.push({
+      x: side * Math.random() * 2, y: -1 - Math.random() * 2,
+      vx: side * (7 + Math.random() * 26) * force,
+      vy: -(20 + Math.random() * 34) * force
+    });
+  }
+  if (splashes.length >= SPLASH_MAX) splashes.shift();
+  splashes.push({
+    tx: st.x / P.tileMetres, ty: st.y / P.tileMetres, lz: st.z / P.levelMetres,
+    t: 0, life: 0.5 + force * 0.3, force: force, drops: drops
+  });
+}
+
+function stepSplashes(dt) {
+  for (var i = splashes.length - 1; i >= 0; i--) {
+    var sp = splashes[i];
+    sp.t += dt;
+    if (sp.t >= sp.life) { splashes.splice(i, 1); continue; }
+    for (var d = 0; d < sp.drops.length; d++) {
+      var p = sp.drops[d];
+      p.vy += SPLASH_G * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    }
+  }
+}
+
+var splashMap = {};
+function buildSplashMap() {
+  splashMap = {};
+  for (var i = 0; i < splashes.length; i++) {
+    var sp = splashes[i];
+    var key = clamp(Math.round(sp.tx), 0, WORLD - 1) + ',' +
+              clamp(Math.round(sp.ty), 0, WORLD - 1);
+    (splashMap[key] || (splashMap[key] = [])).push(sp);
+  }
+}
+
+/* A sheet of water thrown up in an arch that widens and falls back, foam
+   along its crest, and the droplets that got clear of it. The arch is drawn
+   as a rim rather than filled: a solid mound of blue reads as a hill, and
+   what is wanted is spray. */
+function drawSplash(g, sp) {
+  var pos = projectPoint(sp.tx, sp.ty, sp.lz);
+  var bx = Math.round(pos.sx), by = Math.round(pos.sy) + 1;
+  var age = sp.t / sp.life;
+  g.globalAlpha = clamp((1 - age) * 1.4, 0, 1);
+
+  var wide = 2 + sp.force * 5.5 * (0.4 + age);
+  var lift = sp.force * 9 * Math.sin(Math.min(1, age * 1.35) * Math.PI);
+  var w = Math.round(wide);
+  for (var i = -w; i <= w; i++) {
+    var f = i / wide;
+    var h = Math.round(lift * (1 - f * f));
+    if (h <= 0) continue;
+    var thick = 1 + Math.round((1 - Math.abs(f)) * (1 + sp.force));
+    g.fillStyle = PAL.flowL; g.fillRect(bx + i, by - h, 1, Math.min(thick, h));
+    g.fillStyle = PAL.foam;  g.fillRect(bx + i, by - h, 1, 1);
+  }
+
+  // foam running out along the water it landed in
+  if (w > 1) {
+    g.globalAlpha = clamp((1 - age) * 0.8, 0, 1);
+    g.fillStyle = PAL.foam;
+    g.fillRect(bx - w, by, w * 2 + 1, 1);
+    g.globalAlpha = clamp((1 - age) * 1.4, 0, 1);
+  }
+
+  g.fillStyle = PAL.foam;
+  for (var d = 0; d < sp.drops.length; d++) {
+    var p = sp.drops[d];
+    g.fillRect(bx + Math.round(p.x), by + Math.round(p.y), 1, 1);
+  }
+  g.globalAlpha = 1;
 }
 
 /* ═══════════════════════════ guests ═══════════════════════════
@@ -2927,6 +3042,7 @@ function stepRideRun(ride, run, ahead, dt) {
   }
   var st = pts[lo];
   var def = PIECE_SETS[set][ride.pieces[run.path.owner[lo]].type];
+  checkSplash(ride, run, run.path.owner[lo], st, run.v);
 
   run.v = propel(P, def, run.v, st.t.z, dt);
 
@@ -3849,6 +3965,12 @@ function drawWorld(g) {
       if (cars) for (var ci = 0; ci < cars.length; ci++)
         drawCar(g, cars[ci].ride, cars[ci].st, cars[ci].i, cars[ci].full);
 
+      // spray in front of the boat that threw it, and never in the map view
+      if (!far) {
+        var wet2 = splashMap[w.x + ',' + w.y];
+        if (wet2) for (var si = 0; si < wet2.length; si++) drawSplash(g, wet2[si]);
+      }
+
       // a faint grid over everything you are allowed to build on
       if (!far && armed() && buildableHere(t)) {
         g.globalAlpha = 0.22;
@@ -4664,6 +4786,7 @@ function render() {
   buildTrackMap();
   buildCarMap();
   buildGuestMap();
+  buildSplashMap();
   drawWorld(bctx);
   drawThoughts(bctx);
   drawStrokeGhost(bctx);
@@ -5229,6 +5352,7 @@ function update(dt) {
   // two substeps: the curvature through a loop is tight enough to want them
   if (sim.active) { stepSim(dt / 2); stepSim(dt / 2); }
   stepGuests(dt);
+  stepSplashes(dt);
   if (sim.active && sim.follow && sim.path && sim.ride) {
     var st = sampleAt(sim.s), pos = projectWorld(sim.ride, st.x, st.y, st.z);
     cam.x += (bufW / 2 - pos.sx) * 0.12;
