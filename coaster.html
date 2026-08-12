@@ -3117,15 +3117,37 @@ function serveFacilities(dt) {
    one in front is a train's length and a half clear. */
 function blockGap(P) { return P.cars * P.carGap * P.blockMargin; }
 
-/* How long to wait before deciding a vehicle is never coming back. This was a
-   bare lapTimeout per ride type — 120 and 300, two numbers that said nothing
-   about why. It is a lap that takes about as long as the type expects, plus
-   room for a slow one, and a ride with no lap at all answers with the length
-   of its cycle instead. */
-var RUN_MARGIN = 2.5;
+/* How a ride is judged to have got stuck. Being stuck means something
+   different in each category, so the model is chosen by category rather than
+   by sniffing at whichever field happens to be defined:
+
+     tracked  a lap that should have finished by now — the time the type
+              expects a lap to take, plus room for a slow one
+     flat     a cycle that should have ended — its own cycle, same margin
+     drawn    neither. There is no lap and no cycle: a tube goes round for as
+              long as the river is long, and the only thing that can be said
+              to have gone wrong is that it stopped moving. So: how long a
+              tube may sit on one tile before it counts as stuck.
+
+   The two margins are deliberately different in kind. 'after' on a lap or a
+   cycle is measured from the start of the run; on a drift it is measured
+   from the last tile boundary crossed. */
+var RUN_MARGIN = 2.5;      // how far past its expected time a run may go
+var DRIFT_STALL = 8;       // seconds a tube may sit on one tile
+
+function stallModel(type) {
+  switch (type.category) {
+    case 'flat':  return { kind: 'cycle', after: type.cycleSeconds * RUN_MARGIN };
+    case 'drawn': return { kind: 'drift', after: DRIFT_STALL };
+    default:      return { kind: 'lap', after: type.expectedLap * RUN_MARGIN };
+  }
+}
+/* What a lap or a cycle is allowed to take. A drawn ride has neither, and
+   asking this of one is a mistake worth catching rather than answering. */
 function runWatchdog(type) {
-  var expected = type.cycleSeconds !== undefined ? type.cycleSeconds : type.expectedLap;
-  return expected * RUN_MARGIN;
+  var model = stallModel(type);
+  if (model.kind === 'drift') return Infinity;
+  return model.after;
 }
 
 function operateRides(dt) {
