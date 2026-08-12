@@ -120,7 +120,7 @@ var START_CASH = 10000;                         // what you start a park with
 var SAVE_KEY = 'finley-coaster-park', BEST_KEY = 'finley-coaster-best';
 var ARCHIVE_KEY = 'finley-coaster-park-v1-archive';
 var NOTICE_KEY = 'finley-coaster-v1-notice-seen';
-var SAVE_VERSION = 4;   // 1 single-coaster game, 2 no paths, 3 no rides
+var SAVE_VERSION = 5;   // 1 single-coaster game, 2 no paths, 3 no rides, 4 no flat rides
 
 var PAL = {
   vd:     '#16202a',   // void beyond the world
@@ -324,7 +324,7 @@ function diamondSpan(row) {                 // → [x0, width] for row 0..15
   return [14 - r * 2, 4 + r * 4];
 }
 
-var SPR = { grass: {}, sand: {}, water: {}, path: {}, face: {}, fence: {}, tree: [], deco: {}, track: {} };
+var SPR = { grass: {}, sand: {}, water: {}, path: {}, face: {}, fence: {}, tree: [], deco: {}, track: {}, ship: {} };
 
 function tone3(hex, out, f) {
   var c = shadeHex(hex, f);
@@ -1487,13 +1487,27 @@ function facilityType(id) {
    in progress. Ride construction reuses this in phase 4. */
 var build = {
   tool: null, cat: null, stroke: null, cost: 0, ok: false,
-  mode: null,        // null | 'station' | 'track' | 'entrance' | 'exit'
+  mode: null,        // null | 'station' | 'flat' | 'track' | 'entrance' | 'exit'
   ride: null,        // the ride being built
-  rideType: null,    // the type chosen, while siting a station
+  rideType: null,    // the type chosen, while siting a station or a footprint
   station: null,     // { x, y, d } under the finger
+  flat: null,        // { x, y, rot } under the finger, for a flat ride
   piece: 'straight'  // selected piece
 };
 function armed() { return !!build.tool; }
+/* Where the build state goes once the doors are dealt with. A tracked ride
+   drops back to its piece palette; a flat ride has none, and sending it to
+   'track' would open a build window with no piece set behind it. */
+function doneWithDoors() {
+  build.mode = (build.ride && isFlat(build.ride)) ? null : 'track';
+}
+/* What to tap, named after the thing the door hangs on. A flat ride has no
+   station, and telling somebody to tap beside one is how a five-by-three
+   footprint gets stared at. */
+function doorHint(which) {
+  var what = (build.ride && isFlat(build.ride)) ? 'THE RIDE' : 'THE STATION';
+  return 'TAP A TILE BY ' + what + ' FOR THE WAY ' + (which === 'entrance' ? 'IN' : 'OUT');
+}
 function armTool(id) { armToolObj(TOOLS[id] || null); }
 function armToolObj(tool) {
   build.tool = tool || null;
@@ -1505,12 +1519,19 @@ function disarm() { build.tool = null; build.stroke = null; layoutUI(); }
 
 /* ═══════════════════════════ rides ═══════════════════════════
    RIDE_TYPES is a data table, not a set of branches. Every number the
-   physics or the ratings need lives here, so a new ride is a new row. */
+   physics or the ratings need lives here, so a new ride is a new row.
+
+   category splits the table in two and is the only fork that matters:
+   a 'tracked' ride is a chain of pieces with a train running an integrator
+   over it, a 'flat' ride is a footprint with a cycle timer. A flat ride
+   never reaches the track builder, the path sampler, the lift-hill rules or
+   the vehicle system, and states its ratings outright rather than earning
+   them on a test lap. family is what the thing is called in a menu. */
 
 var RIDE_TYPES = [
   {
-    id: 'coaster', name: 'TIMBER COASTER', category: 'COASTERS',
-    buildMode: 'track', needsWater: false,
+    id: 'coaster', name: 'TIMBER COASTER', family: 'COASTERS',
+    category: 'tracked', buildMode: 'track', needsWater: false,
     baseCost: 600, capacity: 8, weatherAffinity: 1,
     maxTrains: 2, trainSpacing: 0.34, dwell: 3, queueMax: 24,
     expectedLap: 48,
@@ -1535,8 +1556,8 @@ var RIDE_TYPES = [
     }
   },
   {
-    id: 'flume', name: 'LOG FLUME', category: 'WATER RIDES',
-    buildMode: 'track', needsWater: false,
+    id: 'flume', name: 'LOG FLUME', family: 'WATER RIDES',
+    category: 'tracked', buildMode: 'track', needsWater: false,
     baseCost: 750, capacity: 4, weatherAffinity: 1.35,
     maxTrains: 4, trainSpacing: 0.22, dwell: 2, queueMax: 30,
     expectedLap: 120,
@@ -1565,8 +1586,33 @@ var RIDE_TYPES = [
                     intenseOver: 10, intenseMul: 0.35,
                     sicklyOver: 6, sicklyMul: 0.85 }
     }
+  },
+  {
+    /* The first flat ride. No track, no train, no test lap: it stands on a
+       footprint and runs a cycle on a clock. Its ratings are stated here
+       because there is no telemetry to derive them from — a swinging boat
+       does the same thing every time it runs, which is exactly why it needs
+       no integrator. */
+    id: 'ship', name: 'PIRATE SHIP', family: 'FLAT RIDES',
+    category: 'flat', buildMode: 'footprint', needsWater: false,
+    baseCost: 900, capacity: 24, weatherAffinity: 1,
+    dwell: 0, queueMax: 34,
+    /* Five tiles along the swing plane by three across. Only two orientations:
+       a quarter turn puts the plane on the other world axis, and a half turn
+       is the same ride seen from the other end. */
+    footprint: { long: 5, across: 3, rotations: [0, 90] },
+    cycleSeconds: 60, loadSeconds: 8, dispatchSeconds: 2, unloadSeconds: 6,
+    /* maxAngle stays under a quarter turn past horizontal: it swings, it
+       never goes over the top. period is one there-and-back in seconds. */
+    swing: { maxAngle: 118, period: 4.2, rampIn: 0.35, rampOut: 0.25 },
+    /* Stated, not derived. Exciting enough that a guest picks it over walking
+       past at any sane price, tame enough that the price can still be pushed
+       past what it is worth — which is what the dull warning is for. */
+    ratings: { excitement: 3.6, intensity: 5, nausea: 3.6 }
   }
 ];
+function isFlatType(type) { return !!type && type.category === 'flat'; }
+function isFlat(ride) { return isFlatType(rideType(ride.typeId)); }
 function rideType(id) {
   for (var i = 0; i < RIDE_TYPES.length; i++) if (RIDE_TYPES[i].id === id) return RIDE_TYPES[i];
   return null;
@@ -1699,6 +1745,10 @@ function checkPiece(ride, id) {
     var t = tileAt(cell.x, cell.y);
     if (!t) return 'OFF THE EDGE OF THE MAP';
     if (!t.owned) return 'YOU DO NOT OWN THAT LAND';
+    /* The overlap sweep below compares piece against piece, so a ride that
+       holds its ground by footprint instead was invisible to it and track
+       could be threaded straight through a flat ride. */
+    if (t.rideId !== null && t.rideId !== ride.id) return 'ANOTHER RIDE IS IN THE WAY';
     if (cell.z0 < t.h) return 'THAT GOES UNDERGROUND';
     if (isWater(t) && cell.z0 < t.water) return 'THAT IS UNDER THE WATER';
     if (t.path && cell.z0 < t.path.level + 1) return 'A PATH IS IN THE WAY';
@@ -1795,6 +1845,9 @@ function reclaimTiles(ride) {
       if (t) t.rideId = ride.id;
     }
   }
+  // a flat ride holds its ground by footprint, not by pieces; without this the
+  // sweep above would hand its tiles back to nobody
+  if (ride.footprint) claimFootprint(ride);
   if (ride.entranceTile) { var e = tileAt(ride.entranceTile.x, ride.entranceTile.y); if (e) e.rideId = ride.id; }
   if (ride.exitTile) { var x2 = tileAt(ride.exitTile.x, ride.exitTile.y); if (x2) x2.rideId = ride.id; }
 }
@@ -1804,6 +1857,8 @@ function reclaimTiles(ride) {
    whole point of the path graph. */
 function doorReachable(tile) { return !!tile && reachable(tile.x, tile.y); }
 function canOpen(ride) {
+  // a flat ride has no circuit to close and no lap to run: it is complete and
+  // rated the moment it is placed, so those two refusals never apply to it
   if (!ride.complete) return 'THE CIRCUIT IS NOT FINISHED';
   if (!ride.entranceTile) return 'IT NEEDS A WAY IN: TAP EDIT';
   if (!ride.exitTile) return 'IT NEEDS A WAY OUT: TAP EDIT';
@@ -1902,6 +1957,21 @@ function rideStatusText(ride) {
 
 function deleteRide(ride) {
   var refund = Math.round((ride.spent || 0) * 0.5);
+  /* Anyone aboard goes back on their feet before the ride under them stops
+     existing. A rider left in the 'ride' state is never stepped again: no
+     walk, no needs met, no way home. */
+  if (ride.riders && ride.riders.length) {
+    if (!unloadRiders(ride, ride.riders, true)) {
+      for (var q = 0; q < ride.riders.length; q++) {
+        var g0 = ride.riders[q];
+        g0.state = 'walk'; g0.route = null; g0.target = null;
+        g0.x = world.entrance.x; g0.y = world.entrance.y;
+        var et = tileAt(g0.x, g0.y);
+        g0.level = et && et.path ? et.path.level : (et ? et.h : 0);
+      }
+    }
+    ride.riders = [];
+  }
   for (var i = 0; i < world.tiles.length; i++) {
     var t = world.tiles[i];
     if (t.rideId === ride.id) {
@@ -1924,25 +1994,65 @@ function rideById(id) {
   return null;
 }
 
+/* Level ground you own, clear of everything, all at one height. A station
+   asks this of its four tiles and a flat ride of its footprint, so both
+   refuse for the same reasons in the same words, and a change to what
+   counts as buildable ground cannot apply to one and not the other.
+
+   bad{} names the tiles that failed so a footprint ghost can tint them one
+   by one; a station only ever wanted the first reason, and still gets it. */
+function levelGroundPlan(cells) {
+  var bad = {}, why = null, z = null, i;
+  for (i = 0; i < cells.length; i++) {
+    var c = cells[i], t = tileAt(c.x, c.y);
+    var reason = !t ? 'OFF THE EDGE OF THE MAP'
+      : !t.owned ? 'YOU DO NOT OWN THAT LAND'
+      : isWater(t) ? 'NOT IN THE WATER'
+      : t.path ? 'THERE IS A PATH THERE'
+      : t.rideId !== null ? 'ANOTHER RIDE IS THERE'
+      : (t.object && t.object.type !== 'tree') ? 'SOMETHING IS IN THE WAY'
+      : null;
+    if (!reason) {
+      if (z === null) z = t.h;
+      else if (t.h !== z) reason = 'THE GROUND IS NOT LEVEL';
+    }
+    if (reason) { bad[c.x + ',' + c.y] = 1; if (!why) why = reason; }
+  }
+  return { ok: !why, why: why, z: z, bad: bad, cells: cells };
+}
+
+/* The tiles a flat ride stands on, measured out from the middle so the ghost
+   sits under the finger. rot 0 runs the long axis along world x, rot 90
+   along world y. */
+function footprintCells(type, cx, cy, rot) {
+  var fp = type.footprint;
+  var halfL = (fp.long - 1) >> 1, halfA = (fp.across - 1) >> 1;
+  var cells = [];
+  for (var a = -halfL; a <= halfL; a++) {
+    for (var b = -halfA; b <= halfA; b++) {
+      cells.push(rot ? { x: cx + b, y: cy + a } : { x: cx + a, y: cy + b });
+    }
+  }
+  return cells;
+}
+function footprintPlan(typeId, x, y, rot) {
+  var type = rideType(typeId);
+  var plan = levelGroundPlan(footprintCells(type, x, y, rot));
+  plan.cost = type.baseCost;
+  return plan;
+}
+
 /* A station is four tiles of level ground you own, clear of everything. */
 function stationPlan(typeId, x, y, d) {
   var type = rideType(typeId);
   var def = PIECE_SETS[type.pieceSet].station;
-  var cells = [], z = null;
+  var cells = [];
   for (var i = 0; i < def.tiles; i++) {
-    var cx = x + DX[d] * i, cy = y + DY[d] * i;
-    var t = tileAt(cx, cy);
-    if (!t) return { ok: false, why: 'OFF THE EDGE OF THE MAP' };
-    if (!t.owned) return { ok: false, why: 'YOU DO NOT OWN THAT LAND' };
-    if (isWater(t)) return { ok: false, why: 'NOT IN THE WATER' };
-    if (t.path) return { ok: false, why: 'THERE IS A PATH THERE' };
-    if (t.rideId !== null) return { ok: false, why: 'ANOTHER RIDE IS THERE' };
-    if (t.object && t.object.type !== 'tree') return { ok: false, why: 'SOMETHING IS IN THE WAY' };
-    if (z === null) z = t.h;
-    else if (t.h !== z) return { ok: false, why: 'THE GROUND IS NOT LEVEL' };
-    cells.push({ x: cx, y: cy });
+    cells.push({ x: x + DX[d] * i, y: y + DY[d] * i });
   }
-  return { ok: true, z: z, cells: cells, cost: type.baseCost };
+  var plan = levelGroundPlan(cells);
+  plan.cost = type.baseCost;
+  return plan;
 }
 
 function createRide(typeId, x, y, d) {
@@ -1979,16 +2089,71 @@ function createRide(typeId, x, y, d) {
   return ride;
 }
 
-/* The way on and the way off: one tile each, next to the station, on a tile
-   you own and can reach on foot. */
-function stationSideTiles(ride) {
-  var out = [], seen = {};
-  var def = pieceDef(ride, 'station');
+/* A flat ride is finished the moment it is placed. There is no circuit to
+   close and no lap to run, so it is complete and rated from the off, and the
+   only thing standing between it and opening is a way in and a way out. */
+function rideName(type) {
+  var n = 1;
+  for (var i = 0; i < rides.length; i++) if (rides[i].typeId === type.id) n++;
+  return 'THRILLSBURY ' + type.name.split(' ').pop() + ' ' + n;
+}
+function createFlatRide(typeId, x, y, rot) {
+  var plan = footprintPlan(typeId, x, y, rot);
+  if (!plan.ok) { toast(plan.why); return null; }
+  if (park.cash < plan.cost) { toast('CANNOT AFFORD IT: SHORT BY ' + money(plan.cost - park.cash)); return null; }
+  var type = rideType(typeId);
+  var ride = {
+    id: nextRideId++,
+    name: rideName(type),
+    typeId: typeId,
+    pieces: [],
+    footprint: { x: x, y: y, rot: rot, z: plan.z, cells: plan.cells },
+    station: null, cursor: null,
+    complete: true,
+    entranceTile: null, exitTile: null,
+    status: 'closed',
+    ratings: { excitement: type.ratings.excitement,
+               intensity: type.ratings.intensity,
+               nausea: type.ratings.nausea },
+    ticketPrice: 2,
+    queue: [], riders: [], stats: {}, spent: plan.cost, tested: true,
+    phase: 'load', phaseT: 0, cycleT: 0
+  };
+  rides.push(ride);
+  claimFootprint(ride);
+  park.cash -= plan.cost;
+  park.books.building += plan.cost;
+  toast(ride.name + ' BUILT - NOW ADD A WAY IN AND OUT');
+  return ride;
+}
+function claimFootprint(ride) {
+  var cells = ride.footprint.cells;
+  for (var i = 0; i < cells.length; i++) {
+    var t = tileAt(cells[i].x, cells[i].y);
+    if (!t) continue;
+    if (t.object && t.object.type === 'tree') t.object = null;
+    t.rideId = ride.id;
+  }
+}
+
+/* The tiles a ride's doors may hang on: the squares orthogonally against it,
+   whether "it" is a four-tile station or a five-by-three footprint. Strictly
+   the four edges — a tile touching only at a corner looks joined at this
+   angle and is not, which is the trap the door tints exist to show. */
+function rideEdgeCells(ride) {
+  if (isFlat(ride)) return ride.footprint.cells;
+  var def = pieceDef(ride, 'station'), out = [];
   for (var i = 0; i < def.tiles; i++) {
-    var sx = ride.station.x + DX[ride.station.d] * i;
-    var sy = ride.station.y + DY[ride.station.d] * i;
+    out.push({ x: ride.station.x + DX[ride.station.d] * i,
+               y: ride.station.y + DY[ride.station.d] * i });
+  }
+  return out;
+}
+function stationSideTiles(ride) {
+  var out = [], seen = {}, cells = rideEdgeCells(ride);
+  for (var i = 0; i < cells.length; i++) {
     for (var d = 0; d < 4; d++) {
-      var nx = sx + DX[d], ny = sy + DY[d];
+      var nx = cells[i].x + DX[d], ny = cells[i].y + DY[d];
       var key = nx + ',' + ny;
       if (seen[key]) continue;
       seen[key] = 1;
@@ -2007,7 +2172,8 @@ function doorPlan(ride, x, y) {
   if (t.rideId !== null) return { ok: false, why: 'SOMETHING IS THERE ALREADY' };
   var next = false, sides = stationSideTiles(ride);
   for (var i = 0; i < sides.length; i++) if (sides[i].x === x && sides[i].y === y) next = true;
-  if (!next) return { ok: false, why: 'IT MUST TOUCH THE STATION' };
+  if (!next) return { ok: false, why: isFlat(ride) ? 'IT MUST TOUCH THE RIDE - EDGE TO EDGE, NOT A CORNER'
+                                                   : 'IT MUST TOUCH THE STATION' };
   return { ok: true, cost: 0 };
 }
 
@@ -2966,6 +3132,10 @@ function operateRides(dt) {
   serveFacilities(dt);
   for (var i = 0; i < rides.length; i++) {
     var ride = rides[i];
+    /* A flat ride runs a cycle, not a train. Everything below this line —
+       the block gap, the integrator, the station dispatch — is about a
+       vehicle on a track, and none of it applies. */
+    if (isFlat(ride)) { stepFlatRide(ride, dt); continue; }
     if (ride.dwell > 0) ride.dwell -= dt;
     // the same two substeps the test lap uses: at one full step the integrator
     // loses enough speed on a climb that a ride can pass its test and then
@@ -2989,19 +3159,85 @@ function operateRides(dt) {
     if (tail && tail.s < tail.path.len * type.trainSpacing) continue;
 
     var P = ridePhysics(ride);
-    var load = Math.min(ride.queue.length, type.capacity);
-    var riders = ride.queue.splice(0, load);
-    for (var k = 0; k < riders.length; k++) {
-      riders[k].state = 'ride';
-      riders[k].queueOf = null;
-      riders[k].money -= ride.ticketPrice;
-      riders[k].spent += ride.ticketPrice;
-      park.cash += ride.ticketPrice;
-      park.books.tickets += ride.ticketPrice;
-      ride.takings = (ride.takings || 0) + ride.ticketPrice;
-    }
-    runs.push({ path: buildRidePath(ride), s: 0.01, v: P.liftSpeed, t: 0, riders: riders });
+    runs.push({ path: buildRidePath(ride), s: 0.01, v: P.liftSpeed, t: 0,
+                riders: boardRiders(ride, type.capacity) });
   }
+}
+
+/* The front of the queue gets on: the fare, the books and the rider's own
+   state. A train and a swinging boat load the same way, so the takings and
+   the queue behave the same whichever it is. */
+function boardRiders(ride, room) {
+  var riders = ride.queue.splice(0, Math.max(0, Math.min(ride.queue.length, room)));
+  for (var k = 0; k < riders.length; k++) {
+    riders[k].state = 'ride';
+    riders[k].queueOf = null;
+    riders[k].money -= ride.ticketPrice;
+    riders[k].spent += ride.ticketPrice;
+    park.cash += ride.ticketPrice;
+    park.books.tickets += ride.ticketPrice;
+    ride.takings = (ride.takings || 0) + ride.ticketPrice;
+  }
+  return riders;
+}
+
+/* ── the flat-ride cycle ────────────────────────────────────────────────
+   LOADING takes the queue on until it is full or the loading window closes
+   on anybody at all; DISPATCHED is the beat with the restraints down before
+   it moves; SWINGING is the ride itself, a clock rather than an integrator;
+   UNLOADING sets them down and goes back round. Nothing here samples a path
+   or touches physics, because there is no track under it. */
+function stepFlatRide(ride, dt) {
+  var type = rideType(ride.typeId);
+  ride.phaseT += dt;
+  if (ride.phase !== 'load') ride.cycleT += dt;
+
+  /* The same watchdog a lap gets. A cycle is a clock, so it cannot overrun on
+     its own — this catches a ride wedged mid-cycle by something else, where
+     the riders would otherwise stay aboard for ever. */
+  if (ride.phase !== 'load' && ride.cycleT > runWatchdog(type) && ride.phase !== 'unload') {
+    ride.phase = 'unload';
+    ride.phaseT = type.unloadSeconds;
+  }
+
+  switch (ride.phase) {
+    case 'load':
+      if (ride.status === 'open') {
+        ride.riders = ride.riders.concat(boardRiders(ride, type.capacity - ride.riders.length));
+      }
+      if (!ride.riders.length) { ride.phaseT = 0; break; }
+      if (ride.riders.length >= type.capacity || ride.phaseT >= type.loadSeconds) {
+        ride.phase = 'dispatch'; ride.phaseT = 0; ride.cycleT = 0;
+      }
+      break;
+    case 'dispatch':
+      if (ride.phaseT >= type.dispatchSeconds) { ride.phase = 'swing'; ride.phaseT = 0; }
+      break;
+    case 'swing':
+      if (ride.phaseT >= type.cycleSeconds) { ride.phase = 'unload'; ride.phaseT = 0; }
+      break;
+    case 'unload':
+      if (ride.phaseT < type.unloadSeconds) break;
+      if (!unloadRiders(ride, ride.riders, false)) { holdRiders(ride); break; }
+      ride.riders = [];
+      ride.phase = 'load'; ride.phaseT = 0; ride.cycleT = 0;
+      break;
+    default:
+      ride.phase = 'load'; ride.phaseT = 0;
+  }
+}
+
+/* Where the boat is at this instant, in degrees off vertical. The envelope
+   winds it up over the first third and lets it die away over the last
+   quarter, so it starts and finishes standing still. */
+function swingAngle(ride) {
+  var type = rideType(ride.typeId), S = type.swing;
+  if (ride.phase !== 'swing') return 0;
+  var u = clamp(ride.phaseT / type.cycleSeconds, 0, 1);
+  var amp = u < S.rampIn ? u / S.rampIn
+          : u > 1 - S.rampOut ? (1 - u) / S.rampOut
+          : 1;
+  return S.maxAngle * amp * Math.sin(ride.phaseT * 2 * Math.PI / S.period);
 }
 
 /* Riders leave by the way out whether the lap finished or the train gave up
@@ -3568,7 +3804,7 @@ function layoutUI() {
 
   // construction window: piece palette, build, undo. Lives in the window
   // manager, so it drags around like everything else.
-  if (build.mode === 'track' && build.ride) {
+  if (build.mode === 'track' && build.ride && !isFlat(build.ride)) {
     var bw = findWin('build');
     if (!bw) {
       bw = openWinRaw({ id: 'build', title: 'BUILD TRACK', w: 128, h: 138,
@@ -3604,6 +3840,12 @@ function layoutUI() {
     buttons.push({ id: 'st_turn',   x: uiW - 170, y: 19, w: 46, h: 18, label: 'TURN' });
     buttons.push({ id: 'st_place',  x: uiW - 120, y: 19, w: 52, h: 18, label: 'PLACE' });
     buttons.push({ id: 'st_cancel', x: uiW - 64,  y: 19, w: 60, h: 18, label: 'CANCEL' });
+  } else if (build.mode === 'flat') {
+    // deeper than the station row: turning the thing is the control you reach
+    // for most, and it wants to be findable with a thumb
+    buttons.push({ id: 'fl_turn',   x: uiW - 178, y: 19, w: 56, h: 22, label: 'TURN' });
+    buttons.push({ id: 'fl_place',  x: uiW - 118, y: 19, w: 56, h: 22, label: 'PLACE' });
+    buttons.push({ id: 'fl_cancel', x: uiW - 58,  y: 19, w: 54, h: 22, label: 'CANCEL' });
   } else if (build.mode === 'entrance' || build.mode === 'exit') {
     buttons.push({ id: 'door_skip', x: uiW - 64, y: 19, w: 60, h: 18, label: 'LATER' });
   }
@@ -3740,6 +3982,16 @@ function rideAction(act, ride) {
       break;
     case 'build':
       build.ride = ride;
+      /* A flat ride has no track to edit, so EDIT means its doors. With both
+         already hung it reopens the way in to be moved, which is the only
+         thing left to change about it. */
+      if (isFlat(ride)) {
+        build.mode = !ride.entranceTile ? 'entrance' : !ride.exitTile ? 'exit' : 'entrance';
+        build.doorOnly = !!(ride.entranceTile && ride.exitTile);
+        build.cat = null;
+        toast(build.mode === 'exit' ? 'NOW THE WAY OUT' : doorHint('entrance'));
+        break;
+      }
       /* Door placing is only ever entered the moment the circuit closes, and
          nothing remembers it across a reload — so a ride left without its
          doors could never be given any, and never open. Resume at the step
@@ -3778,13 +4030,21 @@ function pressButton(b) {
     if (!build.cat) disarm(); else layoutUI();
     return;
   }
-  if (b.rideType) {                         // start siting a station
+  if (b.rideType) {                         // start siting a station or a footprint
     disarm();
-    build.mode = 'station';
-    build.rideType = rideType(b.rideType);
-    build.station = null;
+    var rt = rideType(b.rideType);
+    build.rideType = rt;
     build.ride = null;
-    toast('TAP WHERE THE STATION GOES');
+    build.station = null;
+    build.flat = null;
+    if (isFlatType(rt)) {
+      build.mode = 'flat';
+      build.flat = { x: null, y: null, rot: rt.footprint.rotations[0] };
+      toast('TAP WHERE IT GOES - TURN SWINGS IT ROUND');
+    } else {
+      build.mode = 'station';
+      toast('TAP WHERE THE STATION GOES');
+    }
     layoutUI();
     return;
   }
@@ -3833,8 +4093,7 @@ function pressButton(b) {
       if (!build.ride) break;
       build.mode = b.id === 'do_wayin' ? 'entrance' : 'exit';
       build.doorOnly = true;              // came here on purpose, not mid-build
-      toast(build.mode === 'entrance' ? 'TAP A TILE BY THE STATION FOR THE WAY IN'
-                                      : 'TAP A TILE BY THE STATION FOR THE WAY OUT');
+      toast(doorHint(build.mode));
       layoutUI();
       break;
     case 'sim_stop': stopRun(); break;
@@ -3858,8 +4117,32 @@ function pressButton(b) {
       build.mode = null; build.station = null; build.rideType = null;
       layoutUI();
       break;
+    /* A footprint turns on the spot and is placed whole. There is no chain of
+       pieces to start, so placing it goes straight to hanging the doors. */
+    case 'fl_turn':
+      if (build.flat && build.rideType) {
+        var rots = build.rideType.footprint.rotations;
+        var at = rots.indexOf(build.flat.rot);
+        build.flat.rot = rots[(at + 1) % rots.length];
+      }
+      break;
+    case 'fl_place':
+      if (!build.flat || build.flat.x === null) { toast('TAP WHERE IT GOES FIRST'); break; }
+      var built = createFlatRide(build.rideType.id, build.flat.x, build.flat.y, build.flat.rot);
+      if (built) {
+        build.ride = built;
+        build.mode = 'entrance';
+        build.doorOnly = false;
+        build.flat = null;
+      }
+      layoutUI();
+      break;
+    case 'fl_cancel':
+      build.mode = null; build.flat = null; build.rideType = null;
+      layoutUI();
+      break;
     case 'door_skip':
-      build.mode = 'track';
+      doneWithDoors();
       build.doorOnly = false;
       layoutUI();
       break;
@@ -3987,6 +4270,9 @@ function drawWorld(g) {
       var tk = trackMap[w.x + ',' + w.y];
       if (tk) for (var ti = 0; ti < tk.length; ti++) drawPiece(g, tk[ti].set, tk[ti].p);
 
+      var flats = flatMap[w.x + ',' + w.y];
+      if (flats) for (var fi = 0; fi < flats.length; fi++) drawFlatRide(g, flats[fi]);
+
       var folk = guestMap[w.x + ',' + w.y];
       if (folk) for (var fi2 = 0; fi2 < folk.length; fi2++) drawGuest(folk[fi2], g);
 
@@ -4089,6 +4375,201 @@ function buildTrackMap() {
   }
   for (var k in trackMap) {
     trackMap[k].sort(function (a, b) { return a.p.z - b.p.z; });
+  }
+}
+
+/* ── a flat ride on the map ─────────────────────────────────────────────
+   Drawn straight to the buffer rather than baked into a sprite: the frame
+   stands in the swing plane, so its shape follows the ride's own orientation
+   and the camera's together, and the boat has moved by the next frame anyway.
+
+   It sorts like a track piece — held by the tile of its footprint nearest the
+   camera, so the ground behind it is already down and the ground in front
+   still covers it. Being tall, it can be overdrawn by whatever stands on the
+   tile directly in front, exactly as a tree or a hut can. */
+var SHIP_PIVOT = 6.2;    // levels from the ground up to the pivot
+var SHIP_ARM   = 3.6;    // levels from the pivot down to the rail
+var SHIP_HULL  = 1.9;    // levels, half the length of the boat
+var SHIP_DEEP  = 1.5;    // levels from the rail down to the keel
+var SHIP_FOOT  = 1.7;    // tiles along the swing plane to the foot of a leg
+var SHIP_SIDE  = 0.95;   // tiles across it to each frame
+var LEVELS_PER_TILE = 2; // a tile is three metres across, a level one and a half
+
+var flatMap = {};
+function buildFlatMap() {
+  flatMap = {};
+  for (var i = 0; i < rides.length; i++) {
+    var ride = rides[i];
+    if (!ride.footprint || !ride.footprint.cells) continue;
+    var cell = anchorCell(ride.footprint);
+    var key = cell.x + ',' + cell.y;
+    (flatMap[key] || (flatMap[key] = [])).push(ride);
+  }
+}
+
+/* A strut between two points. With a shade given it gets a dark side, which
+   is what makes a two-pixel pole look round; without one it is a flat run,
+   which is all the inside of a hull needs and half the pixels. */
+function limb(g, p0, p1, col, colD) {
+  var dx = p1.x - p0.x, dy = p1.y - p0.y;
+  var n = Math.max(1, Math.round(Math.max(Math.abs(dx), Math.abs(dy))));
+  for (var i = 0; i <= n; i++) {
+    var x = Math.round(p0.x + dx * i / n), y = Math.round(p0.y + dy * i / n);
+    if (colD === undefined) { g.fillStyle = col; g.fillRect(x, y, 2, 1); continue; }
+    g.fillStyle = colD; g.fillRect(x, y, 2, 1);
+    g.fillStyle = col;  g.fillRect(x, y, 1, 1);
+  }
+}
+
+/* The screen offsets of the swing plane and the axis across it. Both depend on
+   which way the ride was turned and which way the camera is looking, and on
+   nothing else — which is why the standing part of it can be drawn once and
+   kept. */
+function shipAxes(rot) {
+  return { L: projectDir(rot ? 0 : 1, rot ? 1 : 0, 0),
+           A: projectDir(rot ? 1 : 0, rot ? 0 : 1, 0) };
+}
+function shipPlacer(L, A, bx, by) {
+  return function (a, b, z) {
+    return { x: bx + L.x * a + A.x * b, y: by + L.y * a + A.y * b - z * ZH };
+  };
+}
+
+/* Frames, pivot and shadow: everything that does not move. Baked once per
+   orientation and camera angle — eight small canvases in the worst case —
+   because plotting it live cost more pixels a frame than the whole crowd. */
+function shipFrameSprite(rot, half) {
+  var key = rot + '|' + cam.rot + '|' + half;
+  if (!SPR.ship[key]) {
+    var ax = shipAxes(rot);
+    var probe = { x0: 1e9, y0: 1e9, x1: -1e9, y1: -1e9 };
+    var bounds = {
+      globalAlpha: 1, fillStyle: '',
+      fillRect: function (x, y, w, h) {
+        probe.x0 = Math.min(probe.x0, x); probe.y0 = Math.min(probe.y0, y);
+        probe.x1 = Math.max(probe.x1, x + w); probe.y1 = Math.max(probe.y1, y + h);
+      }
+    };
+    plotShipFrame(bounds, shipPlacer(ax.L, ax.A, 0, 0), ax.A, half);
+    var pad = 2;
+    var t = newCanvas(Math.max(1, Math.ceil(probe.x1 - probe.x0) + pad * 2),
+                      Math.max(1, Math.ceil(probe.y1 - probe.y0) + pad * 2));
+    plotShipFrame(t.g, shipPlacer(ax.L, ax.A, -probe.x0 + pad, -probe.y0 + pad), ax.A, half);
+    SPR.ship[key] = { c: t.c, ox: probe.x0 - pad, oy: probe.y0 - pad };
+  }
+  return SPR.ship[key];
+}
+
+/* The standing part, in two halves. The boat swings between the frames, so
+   the one nearer the camera belongs in front of it and the one behind it
+   behind — drawn as one piece, a near leg would vanish under a boat it is
+   standing in front of. */
+function plotShipFrame(g, pt, A, half) {
+  var farB = A.y > 0 ? -1 : 1;
+  if (half === 'far') {
+    var mid = pt(0, 0, 0);                 // the ground it stands on
+    g.globalAlpha = 0.2;
+    g.fillStyle = '#000';
+    for (var k = -15; k <= 15; k++) {
+      var wide = Math.round(36 * Math.sqrt(Math.max(0, 1 - (k / 15) * (k / 15))));
+      if (wide > 0) g.fillRect(Math.round(mid.x) - wide, Math.round(mid.y) + k, wide * 2, 1);
+    }
+    g.globalAlpha = 1;
+    drawShipFrame(g, pt, farB);
+    for (var h = 0; h < 3; h++) {          // the pivot, across the top of both
+      limb(g, pt(0, -0.6, SHIP_PIVOT - h * 0.12), pt(0, 0.6, SHIP_PIVOT - h * 0.12),
+           h ? PAL.railD : PAL.railL, PAL.railD);
+    }
+  } else {
+    drawShipFrame(g, pt, -farB);
+  }
+}
+
+function drawFlatRide(g, ride) {
+  var fp = ride.footprint;
+  var rx = rotX(fp.x, fp.y), ry = rotY(fp.x, fp.y);
+  var bx = (rx - ry) * HW + cam.x + HW;
+  var by = (rx + ry) * HH - fp.z * ZH + cam.y + HH;
+  var ax = shipAxes(fp.rot);
+  var far = shipFrameSprite(fp.rot, 'far'), near = shipFrameSprite(fp.rot, 'near');
+  g.drawImage(far.c, Math.round(bx + far.ox), Math.round(by + far.oy));
+  drawShipBoat(g, ride, shipPlacer(ax.L, ax.A, bx, by));
+  g.drawImage(near.c, Math.round(bx + near.ox), Math.round(by + near.oy));
+}
+
+/* One A-frame: two legs splayed along the swing plane, tied at knee height,
+   standing on a plate. b is which side of the boat it is on. */
+function drawShipFrame(g, pt, b) {
+  var foot = b * SHIP_SIDE, top = b * 0.5;
+  var apex = pt(0, top, SHIP_PIVOT);
+  for (var s = -1; s <= 1; s += 2) {
+    limb(g, pt(s * SHIP_FOOT, foot, 0), apex, s < 0 ? PAL.railL : PAL.rail, PAL.railD);
+    var f = pt(s * SHIP_FOOT, foot, 0);
+    g.fillStyle = PAL.platD;
+    g.fillRect(Math.round(f.x) - 3, Math.round(f.y) - 1, 7, 2);
+    g.fillStyle = PAL.plat;
+    g.fillRect(Math.round(f.x) - 3, Math.round(f.y) - 1, 7, 1);
+  }
+  limb(g, pt(-SHIP_FOOT * 0.42, (foot + top) / 2, SHIP_PIVOT * 0.55),
+          pt(SHIP_FOOT * 0.42, (foot + top) / 2, SHIP_PIVOT * 0.55), PAL.rail, PAL.railD);
+}
+
+/* The boat hangs from the pivot on two arms and tilts with them. Everything
+   is measured in levels along the arm and along the hull, then turned into a
+   horizontal offset in tiles and a vertical one in levels — a tile across is
+   two levels up, so the two cannot share a unit. */
+function drawShipBoat(g, ride, pt) {
+  var th = swingAngle(ride) * Math.PI / 180;
+  var s = Math.sin(th), c = Math.cos(th);
+  /* u runs along the boat from stern to prow and lift down from the rail to
+     the keel, both in levels; across is in tiles, the way pt takes it. A tile
+     across is two levels up, so the horizontal part is halved and the
+     vertical is not. */
+  function hullAt(u, lift, across) {
+    return pt((s * (SHIP_ARM + lift) + c * u) / LEVELS_PER_TILE, across,
+              SHIP_PIVOT - (c * (SHIP_ARM + lift) - s * u));
+  }
+  function hull(u, lift) { return hullAt(u, lift, 0); }
+  for (var arm = -1; arm <= 1; arm += 2) {
+    limb(g, pt(0, arm * 0.42, SHIP_PIVOT),
+            pt((s * SHIP_ARM) / LEVELS_PER_TILE, arm * 0.42, SHIP_PIVOT - c * SHIP_ARM),
+         PAL.railL, PAL.railD);
+  }
+
+  /* The hull, cut in slices from the rail down to the keel. Each slice is a
+     line across the boat rather than a stack of columns: the whole thing
+     leans with the arms, and a line leans with it where a column cannot. It
+     narrows as it goes down, which is what makes it a boat and not a plank. */
+  var SLICES = 7;
+  for (var i = 0; i <= SLICES; i++) {
+    var f = i / SLICES;
+    var lift = f * SHIP_DEEP;
+    var half = SHIP_HULL * (1 - 0.3 * f * f);
+    limb(g, hull(-half, lift), hull(half, lift),
+         i === 0 ? PAL.wood : shadeHex(PAL.wood, 0.86 - f * 0.3));
+  }
+  /* Two gunwales rather than one. Swung up, the boat is seen very nearly edge
+     on, and a hull with no beam to it reads as a plank; the far rail showing
+     above the near one is what says this thing is a boat you sit in. */
+  limb(g, hullAt(-SHIP_HULL, -0.1, -0.3), hullAt(SHIP_HULL, -0.1, -0.3), PAL.handrailD);
+  limb(g, hull(-SHIP_HULL, -0.1), hull(SHIP_HULL, -0.1), PAL.handrail, PAL.handrailD);
+  limb(g, hullAt(-SHIP_HULL * 0.98, 0.12, 0.3), hullAt(SHIP_HULL * 0.98, 0.12, 0.3),
+       shadeHex(PAL.wood, 0.7));
+  // the prow and the stern stand proud of the rail
+  for (var e = -1; e <= 1; e += 2) {
+    limb(g, hull(e * SHIP_HULL, 0.1), hull(e * SHIP_HULL * 1.06, -0.85), PAL.wood, PAL.woodD);
+  }
+
+  var aboard = ride.riders ? ride.riders.length : 0;
+  if (!aboard || ride.phase === 'load') return;
+  var dots = Math.min(10, aboard);                  // one dot to a pair, at this size
+  for (var d0 = 0; d0 < dots; d0++) {
+    var du = -SHIP_HULL * 0.78 + SHIP_HULL * 1.56 * ((d0 + 0.5) / dots);
+    var p = hull(du, -0.45);
+    g.fillStyle = SHIRTS[d0 % SHIRTS.length];
+    g.fillRect(Math.round(p.x), Math.round(p.y), 1, 2);
+    g.fillStyle = SKINS[d0 % SKINS.length];
+    g.fillRect(Math.round(p.x), Math.round(p.y) - 1, 1, 1);
   }
 }
 
@@ -4200,6 +4681,27 @@ function drawDoorHints(g) {
 }
 
 function drawTrackGhost(g) {
+  /* The footprint under the finger, tile by tile: red on every square that
+     refuses it, so a five-by-three that fails on one corner says which. */
+  if (build.mode === 'flat' && build.flat && build.flat.x !== null && build.rideType) {
+    var fpl = footprintPlan(build.rideType.id, build.flat.x, build.flat.y, build.flat.rot);
+    for (var fi = 0; fi < fpl.cells.length; fi++) {
+      var fc = fpl.cells[fi], ft = tileAt(fc.x, fc.y);
+      if (!ft) continue;
+      var frx = rotX(fc.x, fc.y), fry = rotY(fc.x, fc.y);
+      drawTileOutline(g, (frx - fry) * HW + cam.x,
+                         (frx + fry) * HH - surfaceLevel(ft) * ZH + cam.y,
+                         fpl.bad[fc.x + ',' + fc.y] ? PAL.ghostNo : PAL.ghostOK);
+    }
+    if (fpl.ok) {
+      g.globalAlpha = 0.7;
+      drawFlatRide(g, { typeId: build.rideType.id, riders: [], phase: 'load', phaseT: 0,
+                        footprint: { x: build.flat.x, y: build.flat.y,
+                                     rot: build.flat.rot, z: fpl.z, cells: fpl.cells } });
+      g.globalAlpha = 1;
+    }
+    return;
+  }
   if (build.mode === 'station' && build.station) {
     var plan = stationPlan(build.rideType.id, build.station.x, build.station.y, build.station.d);
     var tint = plan.ok ? PAL.ghostOK : PAL.ghostNo;
@@ -4704,10 +5206,9 @@ function drawNotice(g) {
    the bill for the stroke in progress. */
 function drawModeBanner(g) {
   if (!build.mode || build.mode === 'track') return;
-  var msg = build.mode === 'station'
+  var msg = (build.mode === 'station' || build.mode === 'flat')
     ? (build.rideType.name + ' - TAP A SPOT, TURN, THEN PLACE')
-    : (build.mode === 'entrance' ? 'TAP A TILE BY THE STATION FOR THE WAY IN'
-                                 : 'NOW TAP ONE FOR THE WAY OUT');
+    : (build.mode === 'entrance' ? doorHint('entrance') : 'NOW TAP ONE FOR THE WAY OUT');
   var w = Math.min(uiW - 180, textW(msg) + 12);
   panel(g, 2, 19, w, 15);
   text(g, msg, 8, 23, PAL.uiText);
@@ -4820,6 +5321,7 @@ function render() {
   buildCarMap();
   buildGuestMap();
   buildSplashMap();
+  buildFlatMap();
   drawWorld(bctx);
   drawThoughts(bctx);
   drawStrokeGhost(bctx);
@@ -5030,6 +5532,12 @@ function tap(b, uiPt) {
     build.station = { x: t.x, y: t.y, d: d };
     return;
   }
+  if (build.mode === 'flat') {
+    if (!t) { toast('THAT IS OFF THE MAP'); return; }
+    if (!build.flat) build.flat = { x: null, y: null, rot: build.rideType.footprint.rotations[0] };
+    build.flat.x = t.x; build.flat.y = t.y;
+    return;
+  }
   if ((build.mode === 'entrance' || build.mode === 'exit') && build.ride) {
     if (!t) return;
     var plan = doorPlan(build.ride, t.x, t.y);
@@ -5053,11 +5561,11 @@ function tap(b, uiPt) {
     build.doorOnly = false;
     if (build.mode === 'entrance') {
       build.ride.entranceTile = { x: t.x, y: t.y };
-      if (onPurpose) { build.mode = 'track'; toast('WAY IN SET'); }
+      if (onPurpose) { doneWithDoors(); toast('WAY IN SET'); }
       else { build.mode = 'exit'; toast('NOW THE WAY OUT'); }
     } else {
       build.ride.exitTile = { x: t.x, y: t.y };
-      build.mode = 'track';
+      doneWithDoors();
       if (onPurpose) toast('WAY OUT SET');
       else { build.ride.status = 'closed'; toast(build.ride.name + ' IS BUILT'); }
     }
@@ -5192,6 +5700,10 @@ function serialiseRides() {
     }
     out.push({
       id: r.id, name: r.name, typeId: r.typeId, pieces: pieces,
+      /* A flat ride keeps a footprint where a tracked one keeps track. The
+         cells are worked out again on load from the middle and the turn, so
+         only those three numbers are written. */
+      footprint: r.footprint ? { x: r.footprint.x, y: r.footprint.y, rot: r.footprint.rot } : null,
       station: r.station, cursor: r.cursor, complete: r.complete,
       entranceTile: r.entranceTile, exitTile: r.exitTile,
       status: r.status, ratings: r.ratings, ticketPrice: r.ticketPrice,
@@ -5214,6 +5726,25 @@ function restoreRides(saved) {
       tested: !!d.tested, stalled: !!d.stalled, spent: d.spent || 0,
       queue: [], vehicles: [], stats: {}
     };
+    /* A flat ride comes back standing still with nobody aboard: riders mid
+       cycle are not saved, and a cycle resumed from a stale clock would be a
+       boat full of ghosts. Its ratings are the type's, not the save's, so
+       retuning the ride retunes every one already built. */
+    if (d.footprint) {
+      var ftype = rideType(d.typeId);
+      r.footprint = {
+        x: d.footprint.x, y: d.footprint.y, rot: d.footprint.rot,
+        z: (tileAt(d.footprint.x, d.footprint.y) || { h: 0 }).h,
+        cells: footprintCells(ftype, d.footprint.x, d.footprint.y, d.footprint.rot)
+      };
+      r.ratings = { excitement: ftype.ratings.excitement,
+                    intensity: ftype.ratings.intensity,
+                    nausea: ftype.ratings.nausea };
+      r.complete = true;
+      r.tested = true;
+      r.riders = [];
+      r.phase = 'load'; r.phaseT = 0; r.cycleT = 0;
+    }
     rides.push(r);
     for (var p = 0; p < d.pieces.length; p++) {
       var pc = d.pieces[p];
@@ -5237,7 +5768,14 @@ function migrate(save) {
     save.nextRideId = 1;
     save.v = 4;
   }
-  // future: if (save.v === 4) { ...upgrade to 5...; save.v = 5; }
+  if (save.v === 4) {                             // 4 → 5: flat rides arrived
+    /* Nothing to carry: every ride in a version 4 park is a tracked one, and
+       restoring a ride with no footprint already means exactly that. The step
+       exists so the version gate is real — a park saved by this build states
+       5, and one that predates flat rides is stepped up rather than refused. */
+    save.v = 5;
+  }
+  // future: if (save.v === 5) { ...upgrade to 6...; save.v = 6; }
   if (save.v !== SAVE_VERSION) return null;
   if (save.world !== WORLD) return null;          // world resized under it
   if (!save.h || save.h.length !== WORLD * WORLD) return null;
