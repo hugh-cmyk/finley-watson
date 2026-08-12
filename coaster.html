@@ -2360,12 +2360,27 @@ function addCars(ride, path, s, riders) {
   var cap = rideType(ride.typeId).capacity;
   for (var i = 0; i < P.cars; i++) {
     var st = sampleOn(path, s - i * P.carGap);
-    var key = clamp(Math.round(st.x / P.tileMetres), 0, WORLD - 1) + ',' +
-              clamp(Math.round(st.y / P.tileMetres), 0, WORLD - 1);
+    var key = carTile(ride, st.owner, st, P);
     // riders < 0 means a test lap: show it crewed, as it always has been
     var full = riders < 0 || (i * cap / P.cars) < riders;
     (carMap[key] || (carMap[key] = [])).push({ st: st, i: i, ride: ride, full: full });
   }
+}
+
+/* A car belongs to the tile its piece is painted on, not to the tile it
+   happens to be standing over. A station is four tiles long but is drawn
+   once, on the tile nearest the camera; a train keyed to the tile it stands
+   on is drawn before that, so the platform lands on top of it and the train
+   vanishes into the station. Riding with the piece keeps it in front of its
+   own track and still behind everything nearer. */
+function carTile(ride, owner, st, P) {
+  var piece = ride.pieces[owner];
+  if (piece && piece.cells) {
+    var cell = anchorCell(piece);
+    if (cell) return cell.x + ',' + cell.y;
+  }
+  return clamp(Math.round(st.x / P.tileMetres), 0, WORLD - 1) + ',' +
+         clamp(Math.round(st.y / P.tileMetres), 0, WORLD - 1);
 }
 
 /* ── splashes ──────────────────────────────────────────────────────────
@@ -2392,27 +2407,30 @@ function checkSplash(ride, run, owner, st, v) {
   var from = set[ride.pieces[was].type], to = set[ride.pieces[owner].type];
   if (!from.channel || !(from.slope < 0)) return;
   if ((to.slope || 0) < 0) return;                // still on the way down
-  spawnSplash(ride, st, v, -from.slope);
+  spawnSplash(ride, owner, st, v, -from.slope);
 }
 
-function spawnSplash(ride, st, v, drop) {
+/* The owner index is handed in rather than read off the sample: a raw path
+   point carries no owner, only sampleOn adds one. */
+function spawnSplash(ride, owner, st, v, drop) {
   var P = ridePhysics(ride);
   // how hard it landed: the speed it arrived at, weighted by the steepness
   var force = clamp(Math.abs(v) / 7 * (0.55 + drop * 0.3), 0, 1.4);
   if (force < 0.28) return;                       // a boat trickling down makes none
-  var n = 5 + Math.round(force * 9), drops = [];
+  var n = 7 + Math.round(force * 13), drops = [];
   for (var i = 0; i < n; i++) {
     var side = Math.random() < 0.5 ? -1 : 1;
     drops.push({
-      x: side * Math.random() * 2, y: -1 - Math.random() * 2,
-      vx: side * (7 + Math.random() * 26) * force,
-      vy: -(20 + Math.random() * 34) * force
+      x: side * Math.random() * 3, y: -1 - Math.random() * 3,
+      vx: side * (9 + Math.random() * 32) * force,
+      vy: -(26 + Math.random() * 42) * force
     });
   }
   if (splashes.length >= SPLASH_MAX) splashes.shift();
   splashes.push({
     tx: st.x / P.tileMetres, ty: st.y / P.tileMetres, lz: st.z / P.levelMetres,
-    t: 0, life: 0.5 + force * 0.3, force: force, drops: drops
+    tile: carTile(ride, owner, st, P),
+    t: 0, life: 0.6 + force * 0.35, force: force, drops: drops
   });
 }
 
@@ -2435,9 +2453,7 @@ function buildSplashMap() {
   splashMap = {};
   for (var i = 0; i < splashes.length; i++) {
     var sp = splashes[i];
-    var key = clamp(Math.round(sp.tx), 0, WORLD - 1) + ',' +
-              clamp(Math.round(sp.ty), 0, WORLD - 1);
-    (splashMap[key] || (splashMap[key] = [])).push(sp);
+    (splashMap[sp.tile] || (splashMap[sp.tile] = [])).push(sp);
   }
 }
 
@@ -2451,8 +2467,8 @@ function drawSplash(g, sp) {
   var age = sp.t / sp.life;
   g.globalAlpha = clamp((1 - age) * 1.4, 0, 1);
 
-  var wide = 2 + sp.force * 5.5 * (0.4 + age);
-  var lift = sp.force * 9 * Math.sin(Math.min(1, age * 1.35) * Math.PI);
+  var wide = 2 + sp.force * 7 * (0.4 + age);
+  var lift = sp.force * 13 * Math.sin(Math.min(1, age * 1.35) * Math.PI);
   var w = Math.round(wide);
   for (var i = -w; i <= w; i++) {
     var f = i / wide;
@@ -4039,17 +4055,21 @@ function drawBridgeSupports(g, t, sx, sy) {
 /* Which tile each piece is painted on: the one nearest the camera, so the
    terrain behind it is already down and the terrain in front still covers it.
    Ported, but walking every ride rather than a single track. */
+function anchorCell(p) {
+  var best = null, bestD = -1e9;
+  for (var c = 0; c < p.cells.length; c++) {
+    var cell = p.cells[c], dd = rotX(cell.x, cell.y) + rotY(cell.x, cell.y);
+    if (dd > bestD) { bestD = dd; best = cell; }
+  }
+  return best;
+}
 var trackMap = {};
 function buildTrackMap() {
   trackMap = {};
   for (var r = 0; r < rides.length; r++) {
     var ride = rides[r], setId = rideType(ride.typeId).pieceSet;
     for (var i = 0; i < ride.pieces.length; i++) {
-      var p = ride.pieces[i], best = null, bestD = -1e9;
-      for (var c = 0; c < p.cells.length; c++) {
-        var cell = p.cells[c], dd = rotX(cell.x, cell.y) + rotY(cell.x, cell.y);
-        if (dd > bestD) { bestD = dd; best = cell; }
-      }
+      var p = ride.pieces[i], best = anchorCell(p);
       var key = best.x + ',' + best.y;
       (trackMap[key] || (trackMap[key] = [])).push({ p: p, set: setId });
     }
