@@ -1513,6 +1513,7 @@ var RIDE_TYPES = [
     buildMode: 'track', needsWater: false,
     baseCost: 600, capacity: 8, weatherAffinity: 1,
     maxTrains: 2, trainSpacing: 0.34, dwell: 3, queueMax: 24,
+    expectedLap: 48,
     pieceSet: 'coaster',
     physics: {
       gravity: 9.81, friction: 0.022, drag: 0.0016,
@@ -1520,7 +1521,7 @@ var RIDE_TYPES = [
       rollbackSpeed: -0.3, rollbackRate: 2.5, stallAfter: 0.8,
       cars: 4, carGap: 2.6, tileMetres: 3, levelMetres: 1.5,
       frameWindow: 0.9, curveWindow: 1.5, sampleStep: 14,
-      airtimeUnder: 0.2, dropMin: 1.2, lapTimeout: 120, blockMargin: 1.6
+      airtimeUnder: 0.2, dropMin: 1.2, blockMargin: 1.6
     },
     ratingWeights: {
       excitement: { base: 0.5, drops: 0.22, biggestDrop: 0.10, topSpeed: 0.055,
@@ -1538,6 +1539,7 @@ var RIDE_TYPES = [
     buildMode: 'track', needsWater: false,
     baseCost: 750, capacity: 4, weatherAffinity: 1.35,
     maxTrains: 4, trainSpacing: 0.22, dwell: 2, queueMax: 30,
+    expectedLap: 120,
     pieceSet: 'flume',
     physics: {
       /* The current carries the boat: it is pushed towards channelSpeed on
@@ -1549,7 +1551,7 @@ var RIDE_TYPES = [
       rollbackSpeed: -0.3, rollbackRate: 2.5, stallAfter: 1.6,
       cars: 1, carGap: 3, tileMetres: 3, levelMetres: 1.5,
       frameWindow: 0.9, curveWindow: 1.5, sampleStep: 14,
-      airtimeUnder: 0.2, dropMin: 1.2, lapTimeout: 300, blockMargin: 2.2
+      airtimeUnder: 0.2, dropMin: 1.2, blockMargin: 2.2
     },
     /* A flume earns its excitement from the drop and the length of the ride,
        not from speed and airtime, and it barely troubles anyone's stomach. */
@@ -2949,6 +2951,17 @@ function serveFacilities(dt) {
    one in front is a train's length and a half clear. */
 function blockGap(P) { return P.cars * P.carGap * P.blockMargin; }
 
+/* How long to wait before deciding a vehicle is never coming back. This was a
+   bare lapTimeout per ride type — 120 and 300, two numbers that said nothing
+   about why. It is a lap that takes about as long as the type expects, plus
+   room for a slow one, and a ride with no lap at all answers with the length
+   of its cycle instead. */
+var RUN_MARGIN = 2.5;
+function runWatchdog(type) {
+  var expected = type.cycleSeconds !== undefined ? type.cycleSeconds : type.expectedLap;
+  return expected * RUN_MARGIN;
+}
+
 function operateRides(dt) {
   serveFacilities(dt);
   for (var i = 0; i < rides.length; i++) {
@@ -3097,7 +3110,7 @@ function stepRideRun(ride, run, ahead, dt) {
     return 'off';
   }
 
-  if (run.s >= L || run.t > P.lapTimeout) {
+  if (run.s >= L || run.t > runWatchdog(rideType(ride.typeId))) {
     var carried = run.riders.length;
     if (!unloadRiders(ride, run.riders, false)) { holdRiders(ride); return 'hold'; }
     ride.dwell = rideType(ride.typeId).dwell;
