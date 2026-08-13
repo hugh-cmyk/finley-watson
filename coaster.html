@@ -1153,8 +1153,15 @@ function ownedCount() {
   for (var i = 0; i < world.tiles.length; i++) if (world.tiles[i].owned) n++;
   return n;
 }
+/* The rise is what makes expansion a decision, but at 55p a tile it compounded
+   into a wall: doubling the starting plot cost nearly twice the money you begin
+   with, and the 200 tiles after that came to £53,000. Since a ride now wants
+   room — the largest lazy river needs a field about 66 by 36, where the plot
+   you start on is 20 by 20 — that wall stood in front of the rides rather than
+   after them. A gentler slope off a lower base keeps the shape of the idea and
+   puts the first few expansions inside a park's means. */
 function landPrice() {
-  return Math.round(45 + Math.max(0, park.owned - PLOT * PLOT) * 0.55);
+  return Math.round(20 + Math.max(0, park.owned - PLOT * PLOT) * 0.05);
 }
 
 /* ═══════════════════════════ paths ═══════════════════════════
