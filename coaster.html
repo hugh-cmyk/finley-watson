@@ -125,7 +125,7 @@ var START_CASH = 10000;                         // what you start a park with
 var SAVE_KEY = 'finley-coaster-park', BEST_KEY = 'finley-coaster-best';
 var ARCHIVE_KEY = 'finley-coaster-park-v1-archive';
 var NOTICE_KEY = 'finley-coaster-v1-notice-seen';
-var SAVE_VERSION = 6;   // 1 single-coaster, 2 no paths, 3 no rides, 4 no flat rides, 5 no rivers
+var SAVE_VERSION = 7;   // 1 single-coaster, 2 no paths, 3 no rides, 4 no flat, 5 no rivers, 6 no rapids
 
 var PAL = {
   vd:     '#16202a',   // void beyond the world
@@ -542,19 +542,66 @@ function pathSprite(kind, mask) {
   return SPR.path[key];
 }
 
+/* The four corners of the diamond, and which two edges meet at each. Used to
+   tell a bend from a straight run: where two banks meet at a corner the water
+   turns, and where two stretches of water meet at one it turns the other way. */
+var TILE_CORNERS = [
+  { x: 16, y: 0,  a: 2, b: 3 },     // top:    upper-left and upper-right
+  { x: 31, y: 8,  a: 3, b: 0 },     // right:  upper-right and lower-right
+  { x: 16, y: 15, a: 0, b: 1 },     // bottom: lower-right and lower-left
+  { x: 0,  y: 8,  a: 1, b: 2 }      // left:   lower-left and upper-left
+];
+/* Distance in tile terms rather than screen pixels: a square is twice as wide
+   as it is tall on screen, so a circle round a corner is an ellipse. */
+function cornerDist(dx, dy) { return Math.sqrt((dx / 2) * (dx / 2) + dy * dy); }
+
 /* A river tile: dithered water with a bank down every screen edge that has no
    water next door. The mask is the same kerb mask a path uses and the bits
    mean the same thing, so there is one edge convention in the game rather
-   than two that drift apart. Sixteen of these, made once. */
-function makeRiverTop(mask, seed) {
+   than two that drift apart.
+
+   Bends are rounded off. Where two banks meet, the land is carried round the
+   outside of the turn; where two stretches of water meet, a little land is
+   left standing on the inside of it. A straight run has its banks on opposite
+   edges, so neither case comes up and it stays square. */
+function makeRiverTop(mask, seed, rapids) {
   var t = newCanvas(32, 22), g = t.g, rnd = mulberry32(seed + mask * 613);
   var TOP = 6;                       // headroom above the diamond for the bank
+  var OUTER = 5.5, INNER = 3.2;      // how far the land reaches round a bend
+  var c, i;
+  var round = [], fillet = [];
+  for (i = 0; i < 4; i++) {
+    c = TILE_CORNERS[i];
+    var banked = (mask & SCREEN_BIT[c.a]) && (mask & SCREEN_BIT[c.b]);
+    var wet = !(mask & SCREEN_BIT[c.a]) && !(mask & SCREEN_BIT[c.b]);
+    if (banked) round.push(c);
+    else if (wet) fillet.push(c);
+  }
+  // an inside corner only means a bend if there is an outside one opposite it
+  if (!round.length) fillet.length = 0;
+
+  function landAt(x, y) {
+    for (var k = 0; k < round.length; k++) {
+      if (cornerDist(x - round[k].x, y - round[k].y) < OUTER) return true;
+    }
+    for (var m = 0; m < fillet.length; m++) {
+      if (cornerDist(x - fillet[m].x, y - fillet[m].y) < INNER) return true;
+    }
+    return false;
+  }
+
   for (var y = 0; y < 16; y++) {
     var sp = diamondSpan(y), x0 = sp[0], x1 = sp[0] + sp[1] - 1;
     for (var x = x0; x <= x1; x++) {
-      var v = rnd(), col = PAL.flow;
-      if (v < 0.16) col = PAL.water;
-      else if (v < 0.22) col = PAL.waterD;
+      var v = rnd(), col;
+      if (landAt(x, y)) {
+        col = v < 0.4 ? PAL.grassD : PAL.grassM;
+      } else if (rapids) {
+        // broken water: mostly foam, with the channel showing through it
+        col = v < 0.34 ? PAL.foam : v < 0.5 ? '#ffffff' : v < 0.72 ? PAL.flowL : PAL.flow;
+      } else {
+        col = v < 0.16 ? PAL.water : v < 0.22 ? PAL.waterD : PAL.flow;
+      }
       g.fillStyle = col;
       g.fillRect(x, y + TOP, 1, 1);
     }
@@ -578,9 +625,10 @@ function makeRiverTop(mask, seed) {
   }
   return { c: t.c, oy: -TOP };
 }
-function riverSprite(mask) {
-  if (!SPR.river[mask]) SPR.river[mask] = makeRiverTop(mask, 8181);
-  return SPR.river[mask];
+function riverSprite(mask, rapids) {
+  var key = mask + (rapids ? '|r' : '');
+  if (!SPR.river[key]) SPR.river[key] = makeRiverTop(mask, 8181, rapids);
+  return SPR.river[key];
 }
 
 /* The ripple: a few pale dashes drifting the way the water goes. Four
@@ -1479,6 +1527,23 @@ function riverPlan(ride, x, y) {
   return { ok: true, cost: rideType('river').tileCost, z: t.h, bridges: !!t.path };
 }
 
+/* Roughing up a stretch of water, or smoothing it back. Only this ride's own
+   channel can be worked on, and dragging over water that is already the way
+   you are making it does nothing rather than charging for it again. */
+function rapidsPlan(ride, x, y, on) {
+  var t = tileAt(x, y);
+  if (!t) return { ok: false, why: 'OFF THE EDGE OF THE MAP' };
+  if (!t.river || !ride || t.river.rideId !== ride.id) {
+    return { ok: false, why: 'THAT IS NOT YOUR WATER' };
+  }
+  if (!!t.river.rapids === !!on) {
+    return { ok: false, why: on ? 'ALREADY ROUGH' : 'ALREADY CALM', silent: true };
+  }
+  var type = rideType(ride.typeId);
+  // smoothing gives back what roughing cost, less the work of doing it twice
+  return { ok: true, cost: on ? type.rapidsCost : 0, refund: on ? 0 : Math.round(type.rapidsCost * 0.4) };
+}
+
 /* Four-connected, always. A drag bends once along its dominant axis, so it
    cannot lay a diagonal step within itself — but the square it starts on can
    sit corner to corner with what is already drawn, which in this projection
@@ -1549,6 +1614,7 @@ function planStroke() {
     else if (build.tool.kind === 'clear') plan = clearPlan(tl.x, tl.y);
     else if (build.tool.kind === 'facility') plan = facilityPlan(tl.x, tl.y, build.tool.facility);
     else if (build.tool.kind === 'river') plan = riverPlan(build.ride, tl.x, tl.y);
+    else if (build.tool.kind === 'rapids') plan = rapidsPlan(build.ride, tl.x, tl.y, build.tool.rough);
     else plan = landPlan(tl.x, tl.y);
     plan.x = tl.x; plan.y = tl.y;
     st.plans.push(plan);
@@ -1607,6 +1673,10 @@ function commitStroke() {
       if (!build.ride) build.ride = createDrawnRide('river');
       placeRiverTile(build.ride, plan.x, plan.y);
     }
+    else if (build.tool.kind === 'rapids') {
+      tileAt(plan.x, plan.y).river.rapids = build.tool.rough ? 1 : 0;
+      if (plan.refund) park.cash += plan.refund;
+    }
     else { tileAt(plan.x, plan.y).owned = true; tileAt(plan.x, plan.y).forSale = false; }
     spent += plan.cost || 0;
     n++;
@@ -1625,6 +1695,15 @@ function commitStroke() {
       build.ride.spent = (build.ride.spent || 0) + spent;
       remaskRiver(build.ride);
       toast(build.ride.river.cells.length + ' TILES OF WATER - ' + money(spent));
+    }
+  } else if (build.tool.kind === 'rapids') {
+    if (build.ride) {
+      build.ride.spent = (build.ride.spent || 0) + spent;
+      // the rating moves with the water, so it is right the moment you let go
+      if (build.ride.complete) rateRiver(build.ride);
+      var rough = riverRapidsCount(build.ride);
+      toast(rough + ' OF ' + build.ride.river.cells.length + ' TILES ROUGH' +
+            (spent > 0 ? ' - ' + money(spent) : ''));
     }
   } else if (spent > 0) {
     toast(money(spent));
@@ -1854,15 +1933,23 @@ var RIDE_TYPES = [
        stopped moving instead. */
     id: 'river', name: 'LAZY RIVER', family: 'WATER RIDES',
     category: 'drawn', buildMode: 'draw', needsWater: false,
-    baseCost: 500, tileCost: 22, capacity: 2, weatherAffinity: 1,
+    baseCost: 500, tileCost: 22, rapidsCost: 38, capacity: 2, weatherAffinity: 1,
     dwell: 0, queueMax: 40,
     loop: { min: 24, max: 200 },
     flowSpeed: 0.6,        // tiles a second
+    rapidsSpeed: 1.7,      // how much faster the broken water runs
     tubeSpacing: 5,        // tiles of clear water between tubes
     platformTiles: 2,
     /* Low intensity, gentle on the stomach, and excitement on a curve that
-       flattens: 24 tiles gives 2.11, 100 gives 2.78, 200 gives 3.08. */
-    ratings: { exBase: 1.6, exGain: 2, exHalf: 70, intensity: 1.2, nausea: 0.4 }
+       flattens: 24 tiles gives 2.11, 100 gives 2.78, 200 gives 3.08.
+
+       Rapids add to that on a curve of their own, and only the first half of
+       the loop's worth of them counts — a river that is white water from end
+       to end is not a lazy river, and rough needs calm either side of it to
+       be worth anything. They cost a little of the calm this ride trades on,
+       which is what the intensity and nausea terms are. */
+    ratings: { exBase: 1.6, exGain: 2, exHalf: 70, intensity: 1.2, nausea: 0.4,
+               rapidGain: 0.8, rapidHalf: 14, rapidIntensity: 1.5, rapidNausea: 0.8 }
   }
 ];
 function isFlatType(type) { return !!type && type.category === 'flat'; }
@@ -1874,13 +1961,30 @@ function isDrawn(ride) { return isDrawnType(rideType(ride.typeId)); }
    themselves: excitement climbs with the length of the loop and levels off,
    so a river twice as long is better but nothing like twice as good, and
    ringing the whole park with one is not the winning move. */
-function riverRatings(type, len) {
+function riverRatings(type, len, rapids) {
   var R = type.ratings;
+  // past half the loop, more white water buys nothing: rough wants calm around it
+  var counted = Math.min(rapids || 0, Math.floor(len / 2));
+  var share = len ? counted / len : 0;
   return {
-    excitement: R.exBase + R.exGain * (len / (len + R.exHalf)),
-    intensity: R.intensity,
-    nausea: R.nausea
+    excitement: R.exBase + R.exGain * (len / (len + R.exHalf))
+                         + R.rapidGain * (counted / (counted + R.rapidHalf)),
+    intensity: R.intensity + R.rapidIntensity * share,
+    nausea: R.nausea + R.rapidNausea * share
   };
+}
+function riverRapidsCount(ride) {
+  var n = 0, cells = ride.river ? ride.river.cells : [];
+  for (var i = 0; i < cells.length; i++) {
+    var t = tileAt(cells[i].x, cells[i].y);
+    if (t && t.river && t.river.rapids) n++;
+  }
+  return n;
+}
+function rateRiver(ride) {
+  ride.ratings = riverRatings(rideType(ride.typeId),
+                              ride.river.loop ? ride.river.loop.length : ride.river.cells.length,
+                              riverRapidsCount(ride));
 }
 function rideType(id) {
   for (var i = 0; i < RIDE_TYPES.length; i++) if (RIDE_TYPES[i].id === id) return RIDE_TYPES[i];
@@ -2626,7 +2730,7 @@ function closeRiver(ride) {
   setRiverFlow(ride, walkRiver(ride, ride.river.cells[0]));
   ride.complete = true;
   ride.tested = true;
-  ride.ratings = riverRatings(rideType(ride.typeId), ride.river.loop.length);
+  rateRiver(ride);
   if (ride.status === 'building') ride.status = 'closed';
   sfxGood();
   return true;
@@ -3828,7 +3932,10 @@ function stepDrawnRide(ride, dt) {
        cannot be set down, the tube stops, and everything behind it stops. */
     var held = gap < type.tubeSpacing || tube.gone >= len;
     if (!held) {
-      var step = type.flowSpeed * dt;
+      // broken water runs faster, so a tube picks up through it
+      var hereT = tileAt(ride.river.loop[tube.at % len].x, ride.river.loop[tube.at % len].y);
+      var rush = (hereT && hereT.river && hereT.river.rapids) ? type.rapidsSpeed : 1;
+      var step = type.flowSpeed * rush * dt;
       tube.gone += step;
       tube.t += step;
       while (tube.t >= 1) { tube.t -= 1; tube.at = (tube.at + 1) % len; tube.driftT = 0; }
@@ -3868,7 +3975,14 @@ function stepDrawnRide(ride, dt) {
    and away from a toilet. */
 function riverRideSeconds(ride) {
   var type = rideType(ride.typeId);
-  return ride.river && ride.river.loop ? ride.river.loop.length / type.flowSpeed : 0;
+  if (!ride.river || !ride.river.loop) return 0;
+  var loop = ride.river.loop, secs = 0;
+  for (var i = 0; i < loop.length; i++) {
+    var t = tileAt(loop[i].x, loop[i].y);
+    var rush = (t && t.river && t.river.rapids) ? type.rapidsSpeed : 1;
+    secs += 1 / (type.flowSpeed * rush);
+  }
+  return secs;
 }
 
 /* Where the boat is at this instant, in degrees off vertical. The envelope
@@ -4453,13 +4567,18 @@ function layoutUI() {
   if (build.mode === 'river' && build.rideType) {
     var rw3 = findWin('river');
     if (!rw3) {
-      rw3 = openWinRaw({ id: 'river', title: 'DIG THE RIVER', w: 150, h: 86,
-                         x: 8, y: Math.max(20, uiH - 150), draw: drawRiverWinBody });
+      rw3 = openWinRaw({ id: 'river', title: 'DIG THE RIVER', w: 150, h: 108,
+                         x: 8, y: Math.max(20, uiH - 172), draw: drawRiverWinBody });
     }
-    buttons.push({ id: 'rv_close', x: rw3.x + 5, y: rw3.y + rw3.h - 46, w: 74, h: 18,
+    var kind = build.tool ? build.tool.kind : null;
+    buttons.push({ id: 'rv_close', x: rw3.x + 5, y: rw3.y + rw3.h - 68, w: 74, h: 18,
                    label: 'CLOSE LOOP' });
-    buttons.push({ id: 'rv_undo', x: rw3.x + 83, y: rw3.y + rw3.h - 46, w: 60, h: 18,
+    buttons.push({ id: 'rv_undo', x: rw3.x + 83, y: rw3.y + rw3.h - 68, w: 60, h: 18,
                    label: 'UNDO' });
+    buttons.push({ id: 'rv_rough', x: rw3.x + 5, y: rw3.y + rw3.h - 46, w: 74, h: 18,
+                   label: 'RAPIDS', on: kind === 'rapids' && build.tool.rough });
+    buttons.push({ id: 'rv_calm', x: rw3.x + 83, y: rw3.y + rw3.h - 46, w: 60, h: 18,
+                   label: 'CALM', on: kind === 'rapids' && !build.tool.rough });
     buttons.push({ id: 'rv_platform', x: rw3.x + 5, y: rw3.y + rw3.h - 24, w: 74, h: 18,
                    label: 'PLATFORM', on: !!(build.ride && build.ride.platform) });
     buttons.push({ id: 'rv_done', x: rw3.x + 83, y: rw3.y + rw3.h - 24, w: 60, h: 18,
@@ -4853,6 +4972,25 @@ function pressButton(b) {
       if (build.ride) undoRiverTile(build.ride);
       layoutUI();
       break;
+    /* Rough and calm are the same tool pointed two ways, and either one
+       tapped again puts the digger back in your hand. */
+    case 'rv_rough':
+    case 'rv_calm':
+      if (!build.ride || !build.ride.river.cells.length) { toast('CUT SOME WATER FIRST'); break; }
+      var wantRough = b.id === 'rv_rough';
+      var already = build.tool && build.tool.kind === 'rapids' && build.tool.rough === wantRough;
+      armToolObj(already
+        ? { id: 'river_draw', cat: 'RIDES', kind: 'river', drag: 'line',
+            tint: '#48b6e8', hint: 'DRAG TO CUT THE CHANNEL' }
+        : { id: 'river_' + (wantRough ? 'rough' : 'calm'), cat: 'RIDES', kind: 'rapids',
+            rough: wantRough, drag: 'line', tint: wantRough ? '#e8f2fa' : '#48b6e8',
+            hint: wantRough ? 'DRAG OVER WATER TO ROUGHEN IT' : 'DRAG OVER WATER TO CALM IT' });
+      build.mode = 'river';
+      toast(already ? 'BACK TO DIGGING'
+                    : wantRough ? 'DRAG OVER THE WATER TO ROUGHEN IT'
+                                : 'DRAG OVER THE WATER TO CALM IT');
+      layoutUI();
+      break;
     case 'rv_platform':
       if (!build.ride || !build.ride.complete) { toast('CLOSE THE LOOP FIRST'); break; }
       build.mode = 'platform';
@@ -4987,7 +5125,7 @@ function drawWorld(g) {
         for (var re = 0; re < 4; re++) {                 // world mask → screen edges
           if (!(t.river.mask & (1 << ((re + cam.rot) % 4)))) rmask |= SCREEN_BIT[re];
         }
-        var rspr = riverSprite(rmask);
+        var rspr = riverSprite(rmask, t.river.rapids);
         g.drawImage(rspr.c, sx, sy + rspr.oy);
         if (!far) {
           var sdir = (t.river.flow - cam.rot + 4) % 4;
@@ -5165,22 +5303,32 @@ function buildTubeMap() {
       }
     }
     if (!ride.tubes || !ride.river || !ride.river.loop) continue;
-    var loop = ride.river.loop;
+    var loop = ride.river.loop, len = loop.length;
     for (var i = 0; i < ride.tubes.length; i++) {
       var tube = ride.tubes[i];
-      var here = loop[tube.at % loop.length];
-      var next = loop[(tube.at + 1) % loop.length];
+      var at = tube.at % len;
+      var prev = loop[(at - 1 + len) % len], here = loop[at], next = loop[(at + 1) % len];
       var key = here.x + ',' + here.y;
-      (tubeMap[key] || (tubeMap[key] = [])).push({ from: here, to: next, t: tube.t,
-                                                   riders: tube.riders.length });
+      /* A tube crosses a square from the middle of the edge it came in by to
+         the middle of the edge it leaves by, bending about the middle of the
+         square itself. On a straight run those three points are in line and it
+         is a straight line; at a corner it is a curve. Consecutive squares
+         share both the end point and the direction through it, so the whole
+         loop reads as one smooth line rather than a series of right angles. */
+      (tubeMap[key] || (tubeMap[key] = [])).push({
+        a: { x: (prev.x + here.x) / 2, y: (prev.y + here.y) / 2 },
+        c: here,
+        b: { x: (here.x + next.x) / 2, y: (here.y + next.y) / 2 },
+        t: tube.t, riders: tube.riders.length
+      });
     }
   }
 }
 function drawTube(g, tube) {
-  // slide between the middle of one square and the middle of the next
-  var fx = tube.from.x + (tube.to.x - tube.from.x) * tube.t;
-  var fy = tube.from.y + (tube.to.y - tube.from.y) * tube.t;
-  var t0 = tileAt(tube.from.x, tube.from.y);
+  var u = tube.t, v = 1 - u, w2 = 2 * v * u;
+  var fx = v * v * tube.a.x + w2 * tube.c.x + u * u * tube.b.x;
+  var fy = v * v * tube.a.y + w2 * tube.c.y + u * u * tube.b.y;
+  var t0 = tileAt(tube.c.x, tube.c.y);
   var rx = rotX(fx, fy), ry = rotY(fx, fy);
   var cx = Math.round((rx - ry) * HW + cam.x + HW);
   var cy = Math.round((rx + ry) * HH - (t0 ? t0.h : 0) * ZH + cam.y + HH);
@@ -5724,12 +5872,29 @@ function openRatingsWin(ride) {
 function drawRiverWinBody(g, win) {
   var ride = build.ride, type = build.rideType;
   var n = ride ? ride.river.cells.length : 0;
+  var rough = ride ? riverRapidsCount(ride) : 0;
+  var rapidsMode = build.tool && build.tool.kind === 'rapids';
   text(g, n + ' TILES OF WATER', win.x + 5, win.y + 17, PAL.uiText);
-  textRight(g, money(type.tileCost) + ' EACH', win.x + win.w - 5, win.y + 17, PAL.uiDim);
+  textRight(g, money(rapidsMode ? type.rapidsCost : type.tileCost) + ' EACH',
+            win.x + win.w - 5, win.y + 17, PAL.uiDim);
+
+  /* What the white water is worth, while you are putting it in — the count,
+     and how much of it is actually being paid for. */
+  if (rough) {
+    var counted = Math.min(rough, Math.floor(n / 2));
+    text(g, rough + ' ROUGH' + (counted < rough ? ' (' + counted + ' COUNT)' : ''),
+         win.x + 5, win.y + 28, counted < rough ? '#7a4a10' : PAL.uiText);
+    if (ride.complete) {
+      textRight(g, 'E ' + ride.ratings.excitement.toFixed(2),
+                win.x + win.w - 5, win.y + 28, '#12401c');
+    }
+  }
 
   var line, ink = PAL.uiDim;
   if (!ride) line = 'DRAG TO CUT THE CHANNEL';
-  else if (ride.complete) {
+  else if (rapidsMode) {
+    line = build.tool.rough ? 'HALF THE LOOP MAY BE ROUGH' : 'DRAG TO CALM IT AGAIN';
+  } else if (ride.complete) {
     line = ride.platform ? 'READY - GIVE IT DOORS'
                          : 'LOOP CLOSED - NOW A PLATFORM';
     ink = '#12401c';
@@ -5740,7 +5905,7 @@ function drawRiverWinBody(g, win) {
   }
   var lines = wrapText(line, Math.floor((win.w - 10) / ADV));
   for (var i = 0; i < Math.min(2, lines.length); i++) {
-    text(g, lines[i], win.x + 5, win.y + 28 + i * 9, ink);
+    text(g, lines[i], win.x + 5, win.y + 39 + i * 9, ink);
   }
 }
 
@@ -6548,7 +6713,7 @@ function serialise() {
        ride: which ride cut it and which way it runs. The neighbour mask is
        worked out again on load, because it is only ever a cache of what the
        four squares around it already say. */
-    if (t.river) rivers.push([i, t.river.rideId, t.river.flow]);
+    if (t.river) rivers.push([i, t.river.rideId, t.river.flow, t.river.rapids ? 1 : 0]);
   }
   return {
     v: SAVE_VERSION,
@@ -6667,7 +6832,7 @@ function restoreRivers() {
     setRiverFlow(r2, r2.river.loop);
     r2.complete = true;
     r2.tested = true;
-    r2.ratings = riverRatings(rideType(r2.typeId), r2.river.loop.length);
+    rateRiver(r2);
   }
 }
 
@@ -6699,7 +6864,13 @@ function migrate(save) {
     save.rivers = [];
     save.v = 6;
   }
-  // future: if (save.v === 6) { ...upgrade to 7...; save.v = 7; }
+  if (save.v === 6) {                             // 6 → 7: rapids arrived
+    /* A channel square gained a fourth number saying whether it is broken
+       water. Version 6 wrote three, and a missing fourth reads as calm, which
+       is what every stretch of a version 6 river was. */
+    save.v = 7;
+  }
+  // future: if (save.v === 7) { ...upgrade to 8...; save.v = 8; }
   if (save.v !== SAVE_VERSION) return null;
   if (save.world !== WORLD) return null;          // world resized under it
   if (!save.h || save.h.length !== WORLD * WORLD) return null;
@@ -6735,7 +6906,7 @@ function applySave(save) {
   var savedRivers = save.rivers || [];
   for (i = 0; i < savedRivers.length; i++) {
     var rv = savedRivers[i];
-    world.tiles[rv[0]].river = { rideId: rv[1], flow: rv[2], mask: 0 };
+    world.tiles[rv[0]].river = { rideId: rv[1], flow: rv[2], mask: 0, rapids: rv[3] ? 1 : 0 };
   }
   world.entrance = save.entrance || { x: WORLD >> 1, y: WORLD >> 1 };
   park.cash = save.park.cash;
