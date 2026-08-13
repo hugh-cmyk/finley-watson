@@ -1336,19 +1336,23 @@ function doorHintTiles() {
    becomes a bridge one level above the surface and grows supports. */
 
 /* How low the track hangs over a tile, and whether that stretch is the
-   station. Only the ride that claims the tile is searched, so this costs
-   nothing worth measuring. */
-var HEADROOM = 2;                       // levels of clear air to walk under
-function trackOverhead(x, y, rideId) {
-  var ride = rideById(rideId);
-  if (!ride) return null;
+   station. Every ride is searched rather than only the one whose id the tile
+   carries: a square can be claimed by a channel and still have a coaster over
+   it, and the answer to "is there track above this?" cannot depend on which
+   of the two claimed the ground last. Called from the planners, never per
+   frame, and a park's worth of pieces is a few hundred at most. */
+var HEADROOM = 2;                       // levels of clear air to pass under
+function trackOverhead(x, y) {
   var low = null, station = false;
-  for (var p = 0; p < ride.pieces.length; p++) {
-    var pc = ride.pieces[p], cells = pc.cells || [];
-    for (var c = 0; c < cells.length; c++) {
-      if (cells[c].x !== x || cells[c].y !== y) continue;
-      if (pc.type === 'station') station = true;
-      if (low === null || cells[c].z0 < low) low = cells[c].z0;
+  for (var r = 0; r < rides.length; r++) {
+    var pieces = rides[r].pieces || [];
+    for (var p = 0; p < pieces.length; p++) {
+      var pc = pieces[p], cells = pc.cells || [];
+      for (var c = 0; c < cells.length; c++) {
+        if (cells[c].x !== x || cells[c].y !== y) continue;
+        if (pc.type === 'station') station = true;
+        if (low === null || cells[c].z0 < low) low = cells[c].z0;
+      }
     }
   }
   return low === null ? null : { low: low, station: station };
@@ -1361,14 +1365,25 @@ function pathPlan(x, y, typeId) {
   var type = PATH_TYPES[typeId];
   var bridge = isWater(t);
   var level = bridge ? t.water + 1 : t.h;
+  /* A ride's channel is crossed rather than blocked: the path steps up a level
+     and becomes a footbridge, with the water running underneath. One level is
+     enough because a tube sits low in the water and nobody stands up in it. */
+  if (t.river) { bridge = true; level = t.h + 1; }
   if (t.object && t.object.type !== 'tree') return { ok: false, why: 'SOMETHING IS IN THE WAY' };
   /* Track overhead is not an obstruction if it is high enough to walk under.
      Without this a coaster fences off everything it encircles. */
-  if (t.rideId !== null) {
-    var over = trackOverhead(x, y, t.rideId);
+  if (t.rideId !== null && !t.river) {
+    var over = trackOverhead(x, y);
     if (!over) return { ok: false, why: 'A RIDE IS IN THE WAY' };
     if (over.station) return { ok: false, why: 'THE STATION IS IN THE WAY' };
     if (over.low < level + HEADROOM) return { ok: false, why: 'THE TRACK IS TOO LOW HERE' };
+  }
+  // a bridge over the water still has to fit under whatever else is up there
+  if (t.river) {
+    var above = trackOverhead(x, y);
+    if (above && above.low < level + HEADROOM) {
+      return { ok: false, why: 'NO ROOM FOR A BRIDGE UNDER THE TRACK' };
+    }
   }
   if (t.path && t.path.type === typeId && t.path.level === level) {
     return { ok: false, why: 'ALREADY PAVED', silent: true };
@@ -1450,13 +1465,18 @@ function riverPlan(ride, x, y) {
       ? { ok: false, why: 'ALREADY WATER', silent: true }
       : { ok: false, why: 'ANOTHER RIVER IS THERE' };
   }
-  var base = levelGroundPlan([{ x: x, y: y }]);
+  /* Two things a channel may be cut through rather than stopped by: a footpath,
+     which is lifted into a footbridge over the water, and a coaster hanging
+     high enough overhead — the same allowance a footpath gets, so a coaster
+     does not fence off the ground a river wants any more than it fences off
+     the ground a path wants. */
+  var base = levelGroundPlan([{ x: x, y: y }], { path: true, under: true });
   if (!base.ok) return { ok: false, why: base.why };
   var z = riverLevel(ride);
   if (z !== null && t.h !== z) {
     return { ok: false, why: 'THE RIVER RUNS AT LEVEL ' + z + ' - THIS IS ' + t.h };
   }
-  return { ok: true, cost: rideType('river').tileCost, z: t.h };
+  return { ok: true, cost: rideType('river').tileCost, z: t.h, bridges: !!t.path };
 }
 
 /* Four-connected, always. A drag bends once along its dominant axis, so it
@@ -1996,8 +2016,17 @@ function checkPiece(ride, id) {
     if (!t.owned) return 'YOU DO NOT OWN THAT LAND';
     /* The overlap sweep below compares piece against piece, so a ride that
        holds its ground by footprint instead was invisible to it and track
-       could be threaded straight through a flat ride. */
-    if (t.rideId !== null && t.rideId !== ride.id) return 'ANOTHER RIDE IS IN THE WAY';
+       could be threaded straight through a flat ride.
+
+       A channel is the exception: track crosses over water the same way it
+       crosses over a footpath, given the clearance a tube needs. */
+    if (t.rideId !== null && t.rideId !== ride.id) {
+      if (!t.river) return 'ANOTHER RIDE IS IN THE WAY';
+      if (cell.z0 < t.h + HEADROOM) return 'TOO LOW OVER THE WATER';
+    }
+    if (t.river && t.river.rideId !== ride.id && cell.z0 < t.h + HEADROOM) {
+      return 'TOO LOW OVER THE WATER';
+    }
     if (cell.z0 < t.h) return 'THAT GOES UNDERGROUND';
     if (isWater(t) && cell.z0 < t.water) return 'THAT IS UNDER THE WATER';
     if (t.path && cell.z0 < t.path.level + 1) return 'A PATH IS IN THE WAY';
@@ -2238,13 +2267,19 @@ function deleteRide(ride) {
   }
   for (var i = 0; i < world.tiles.length; i++) {
     var t = world.tiles[i];
-    if (t.rideId === ride.id) {
-      t.rideId = null;
-      // the channel goes with it, or the water stays cut into ground the game
-      // now believes is empty and will happily sell you again
-      if (t.river && t.river.rideId === ride.id) t.river = null;
-      if (t.object && (t.object.type === 'rideEntrance' || t.object.type === 'rideExit')) t.object = null;
+    /* The channel is swept by its own owner, not by the tile's. Where a
+       coaster crosses a river the two share the square and only one of them
+       holds its rideId, so going by that alone would leave water cut into
+       ground the game believes is empty and will happily sell you again. */
+    if (t.river && t.river.rideId === ride.id) {
+      t.river = null;
+      unbridgePath(t);
+      if (t.rideId === ride.id) t.rideId = null;
     }
+    if (t.rideId !== ride.id) continue;
+    // hand the ground back to a channel still running under it
+    t.rideId = t.river ? t.river.rideId : null;
+    if (t.object && (t.object.type === 'rideEntrance' || t.object.type === 'rideExit')) t.object = null;
   }
   rides.splice(rides.indexOf(ride), 1);
   park.cash += refund;
@@ -2268,17 +2303,34 @@ function rideById(id) {
 
    bad{} names the tiles that failed so a footprint ghost can tint them one
    by one; a station only ever wanted the first reason, and still gets it. */
-function levelGroundPlan(cells) {
+/* What stops a thing being built on one square, or null. The exceptions are
+   named by the caller rather than assumed: allow.path lets a footpath stay
+   where it is (a channel goes under it and it becomes a bridge), and
+   allow.under lets a ride's track stay if it hangs high enough — the same
+   rule that lets a footpath run under a coaster instead of being fenced out
+   by it. Given neither, this is the strict test a station and a footprint
+   want, unchanged. */
+function groundFault(x, y, allow) {
+  var t = tileAt(x, y);
+  if (!t) return 'OFF THE EDGE OF THE MAP';
+  if (!t.owned) return 'YOU DO NOT OWN THAT LAND';
+  if (isWater(t)) return 'NOT IN THE WATER';
+  if (t.path && !allow.path) return 'THERE IS A PATH THERE';
+  if (t.rideId !== null) {
+    var over = allow.under ? trackOverhead(x, y) : null;
+    if (!over) return 'ANOTHER RIDE IS THERE';
+    if (over.station) return 'THE STATION IS IN THE WAY';
+    if (over.low < t.h + HEADROOM) return 'THE TRACK IS TOO LOW HERE';
+  }
+  if (t.object && t.object.type !== 'tree') return 'SOMETHING IS IN THE WAY';
+  return null;
+}
+function levelGroundPlan(cells, allow) {
   var bad = {}, why = null, z = null, i;
+  allow = allow || {};
   for (i = 0; i < cells.length; i++) {
     var c = cells[i], t = tileAt(c.x, c.y);
-    var reason = !t ? 'OFF THE EDGE OF THE MAP'
-      : !t.owned ? 'YOU DO NOT OWN THAT LAND'
-      : isWater(t) ? 'NOT IN THE WATER'
-      : t.path ? 'THERE IS A PATH THERE'
-      : t.rideId !== null ? 'ANOTHER RIDE IS THERE'
-      : (t.object && t.object.type !== 'tree') ? 'SOMETHING IS IN THE WAY'
-      : null;
+    var reason = groundFault(c.x, c.y, allow);
     if (!reason) {
       if (z === null) z = t.h;
       else if (t.h !== z) reason = 'THE GROUND IS NOT LEVEL';
@@ -2427,8 +2479,26 @@ function placeRiverTile(ride, x, y) {
   if (t.object && t.object.type === 'tree') t.object = null;
   t.river = { rideId: ride.id, flow: 0, mask: 0 };
   t.rideId = ride.id;
+  /* A path already here is carried over the water rather than dug up. It goes
+     up one level and grows the same supports a bridge over a lake does — its
+     neighbours are one level below, which the walking rule already allows, so
+     the crossing joins up without anything else being told about it. */
+  if (t.path && !t.path.bridge) {
+    t.path.level = t.h + 1;
+    t.path.bridge = true;
+  }
   ride.river.cells.push({ x: x, y: y });
   if (ride.river.z === null) ride.river.z = t.h;
+}
+
+/* Put a crossing back to ordinary ground when the water under it goes. Only a
+   bridge this ride raised is lowered: a bridge over the terrain's own water
+   stays where it is. */
+function unbridgePath(t) {
+  if (t.path && t.path.bridge && !isWater(t)) {
+    t.path.level = t.h;
+    t.path.bridge = false;
+  }
 }
 
 /* Which of the four world directions have this ride's water next door. Stored
@@ -2538,7 +2608,7 @@ function undoRiverTile(ride) {
   if (ride.platform) { toast('THE PLATFORM IS ON IT - MOVE THAT FIRST'); return; }
   var last = cells.pop();
   var t = tileAt(last.x, last.y);
-  if (t) { t.river = null; t.rideId = null; }
+  if (t) { t.river = null; t.rideId = null; unbridgePath(t); }
   park.cash += rideType(ride.typeId).tileCost;
   ride.spent = Math.max(0, (ride.spent || 0) - rideType(ride.typeId).tileCost);
   ride.complete = false;
@@ -4923,6 +4993,11 @@ function drawWorld(g) {
           var sdir = (t.river.flow - cam.rot + 4) % 4;
           g.drawImage(rippleSprite(sdir, ui.waterFrame), sx, sy);
           if (t.river.mark) g.drawImage(flowArrowSprite(sdir), sx, sy);
+          /* Tubes go on with the water, before the footbridge that may be
+             over this square — they pass beneath it, and the bridge has to be
+             painted after them to look like one. */
+          var onWater = tubeMap[w.x + ',' + w.y];
+          if (onWater) for (var tw = 0; tw < onWater.length; tw++) drawTube(g, onWater[tw]);
         }
       }
 
@@ -4954,8 +5029,6 @@ function drawWorld(g) {
       var flats = flatMap[w.x + ',' + w.y];
       if (flats) for (var fi = 0; fi < flats.length; fi++) drawFlatRide(g, flats[fi]);
 
-      var tubes = tubeMap[w.x + ',' + w.y];
-      if (tubes && !far) for (var ti2 = 0; ti2 < tubes.length; ti2++) drawTube(g, tubes[ti2]);
 
       var folk = guestMap[w.x + ',' + w.y];
       if (folk) for (var fi2 = 0; fi2 < folk.length; fi2++) drawGuest(folk[fi2], g);
