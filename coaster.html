@@ -125,7 +125,7 @@ var START_CASH = 10000;                         // what you start a park with
 var SAVE_KEY = 'finley-coaster-park', BEST_KEY = 'finley-coaster-best';
 var ARCHIVE_KEY = 'finley-coaster-park-v1-archive';
 var NOTICE_KEY = 'finley-coaster-v1-notice-seen';
-var SAVE_VERSION = 7;   // 1 single-coaster, 2 no paths, 3 no rides, 4 no flat, 5 no rivers, 6 no rapids
+var SAVE_VERSION = 8;   // 1 single-coaster, 2 no paths, 3 rides, 4 flat, 5 rivers, 6 rapids, 7 inversions
 
 var PAL = {
   vd:     '#16202a',   // void beyond the world
@@ -751,11 +751,11 @@ function rampSprite(kind, mask, dir) {
    double as the build ghost. Ported unchanged apart from the piece set key. */
 var RAILSEP = 0.19;
 
-function trackSprite(setId, type, sdir, tint) {
-  var key = setId + '|' + type + '|' + sdir + '|' + (tint || '');
+function trackSprite(setId, def, keyId, sdir, tint, accent) {
+  var key = setId + '|' + keyId + '|' + sdir + '|' + (tint || '') + '|' + (accent || '');
   if (SPR.track[key]) return SPR.track[key];
 
-  var def = PIECE_SETS[setId][type], f = pathFn(def);
+  var f = pathFn(def);
   var STEPS = Math.max(48, Math.round(24 * (def.tiles + 1)));
   var ops = [];
   var tintDark = tint ? shadeHex(tint, 0.55) : null;
@@ -774,7 +774,7 @@ function trackSprite(setId, type, sdir, tint) {
     samples.push({ u: q.u, v: q.v, w: p.w, nu: -dv / m, nv: du / m });
   }
 
-  if (type === 'station') {                    // platform slabs under the rails
+  if (keyId === 'station') {                   // platform slabs under the rails
     for (i = 0; i <= STEPS; i++) {
       var sm0 = samples[i];
       for (var side0 = -1; side0 <= 1; side0 += 2) {
@@ -800,6 +800,23 @@ function trackSprite(setId, type, sdir, tint) {
         plot(tp.x, tp.y + 1, PAL.troughD, false);
         plot(tp.x, tp.y - 1, PAL.trough, false);
       }
+    }
+  } else if (def.spine) {
+    /* A painted steel box the train hangs from: a deep beam with a lit top
+       edge and a shadowed underside, and no sleepers or rails anywhere —
+       those belong to the wooden coaster and are its whole identity. */
+    var paint = accent || '#9b4dd8';
+    var paintD = shadeHex(paint, 0.6), paintL = shadeHex(paint, 1.35);
+    for (i = 0; i <= STEPS; i++) {
+      var sp2 = samples[i];
+      for (var b2 = -0.34; b2 <= 0.34; b2 += 0.17) {
+        var bp = proj(sp2.u + sp2.nu * b2, sp2.v + sp2.nv * b2, sp2.w);
+        plot(bp.x, bp.y + 2, PAL.railD, false);      // the shadowed underside
+        plot(bp.x, bp.y + 1, paintD, false);
+        plot(bp.x, bp.y, paint, true);
+      }
+      var top = proj(sp2.u, sp2.v, sp2.w);
+      plot(top.x, top.y - 1, paintL, true);          // and the lit top edge
     }
   } else {
     for (i = 0; i <= STEPS; i += 3) {          // sleepers
@@ -1801,7 +1818,8 @@ var build = {
   rideType: null,    // the type chosen, while siting a station or a footprint
   station: null,     // { x, y, d } under the finger
   flat: null,        // { x, y, rot } under the finger, for a flat ride
-  piece: 'straight'  // selected piece
+  piece: 'straight', // selected piece
+  sections: 0        // how big an inversion the ghost is showing, while dragging
 };
 function armed() { return !!build.tool; }
 /* Where the build state goes once the doors are dealt with. A tracked ride
@@ -1846,7 +1864,7 @@ function disarmKeepingRide() { build.tool = null; build.stroke = null; }
 var RIDE_TYPES = [
   {
     id: 'coaster', name: 'TIMBER COASTER', family: 'COASTERS',
-    category: 'tracked', buildMode: 'track', needsWater: false,
+    category: 'tracked', buildMode: 'track', needsWater: false, mount: 'above',
     baseCost: 600, capacity: 8, weatherAffinity: 1,
     maxTrains: 2, trainSpacing: 0.34, dwell: 3, queueMax: 24,
     expectedLap: 48,
@@ -1872,7 +1890,7 @@ var RIDE_TYPES = [
   },
   {
     id: 'flume', name: 'LOG FLUME', family: 'WATER RIDES',
-    category: 'tracked', buildMode: 'track', needsWater: false,
+    category: 'tracked', buildMode: 'track', needsWater: false, mount: 'above',
     baseCost: 750, capacity: 4, weatherAffinity: 1.35,
     maxTrains: 4, trainSpacing: 0.22, dwell: 2, queueMax: 30,
     expectedLap: 120,
@@ -1898,6 +1916,47 @@ var RIDE_TYPES = [
                     inversions: 0, drops: 0.25, capG: 7 },
       nausea:     { latG: 0.25, turns: 0.06, inversions: 0, hardG: 0.3, hardGFrom: 3.5 },
       penalties:  { shortUnder: 24, shortMul: 0.8,
+                    intenseOver: 10, intenseMul: 0.35,
+                    sicklyOver: 6, sicklyMul: 0.85 }
+    }
+  },
+  {
+    /* Trains hang under the rail rather than sitting on it, which changes two
+       things and only two: every square of track reserves the step below it as
+       well as its own for the train to swing through, and the track cannot run
+       so low that there is no room for one. Both fall out of the cell band the
+       collision model already keeps — nothing else in the ride knows or cares.
+
+       It inverts, so it earns its ratings from that; there is no stated
+       excitement here, the same as any other tracked ride. */
+    id: 'invert', name: 'STEEL INVERTER', family: 'COASTERS',
+    category: 'tracked', buildMode: 'track', needsWater: false, mount: 'below',
+    accent: '#9b4dd8',
+    baseCost: 1400, capacity: 32, weatherAffinity: 1,
+    maxTrains: 2, trainSpacing: 0.38, dwell: 4, queueMax: 40,
+    expectedLap: 72,
+    trainCars: 8, seatsPerCar: 4,
+    minTrackElevation: 2,
+    pieceSet: 'invert',
+    physics: {
+      gravity: 9.81, friction: 0.014, drag: 0.0011,
+      liftSpeed: 3.6, brakeSpeed: 5, brakeForce: 7, stallSpeed: 0.2,
+      rollbackSpeed: -0.3, rollbackRate: 2.5, stallAfter: 0.8,
+      cars: 8, carGap: 2.2, tileMetres: 3, levelMetres: 1.5,
+      frameWindow: 0.9, curveWindow: 1.5, sampleStep: 14,
+      airtimeUnder: 0.2, dropMin: 1.2, blockMargin: 1.6,
+      /* How fast the train must still be going over the top of an inversion.
+         Below this it does not make it round, which the builder says out loud
+         rather than leaving to be discovered on a test lap. */
+      apexSpeed: 6
+    },
+    ratingWeights: {
+      excitement: { base: 0.6, drops: 0.24, biggestDrop: 0.12, topSpeed: 0.06,
+                    airtime: 0.7, inversions: 1.5, variety: 0.2, length: 0.006 },
+      intensity:  { vertG: 0.5, latG: 0.5, topSpeed: 0.05,
+                    inversions: 0.7, drops: 0.15, capG: 7 },
+      nausea:     { latG: 0.55, turns: 0.2, inversions: 0.9, hardG: 0.5, hardGFrom: 3.5 },
+      penalties:  { shortUnder: 30, shortMul: 0.7,
                     intenseOver: 10, intenseMul: 0.35,
                     sicklyOver: 6, sicklyMul: 0.85 }
     }
@@ -2027,20 +2086,144 @@ var PIECE_SETS = {
     gentleDn: { name: 'GENTLE DOWN',cost: 34,  tiles: 1, dz: -1, slope: -1, channel: true },
     lift:     { name: 'CONVEYOR',   cost: 70,  tiles: 1, dz: 1,  slope: 1,  chain: true, channel: true },
     splash:   { name: 'SPLASH DROP',cost: 90,  tiles: 1, dz: -2, slope: -2, channel: true }
+  },
+  /* Hanging track. No sleepers and no rails — a painted box spine the train
+     hangs from, so the pieces carry spine:true and the artwork reads from
+     that. The vertical loop is not in this set: an inverter's inversions are
+     elements out of INVERSION_TYPES, sized as they are placed. */
+  invert: {
+    station:  { name: 'STATION',    cost: 0,   tiles: 4, dz: 0,  slope: 0, chain: true, spine: true },
+    straight: { name: 'STRAIGHT',   cost: 44,  tiles: 1, dz: 0,  slope: 0, spine: true },
+    curveL:   { name: 'CURVE LEFT', cost: 60,  tiles: 1, dz: 0,  slope: 0, turn: -1, spine: true },
+    curveR:   { name: 'CURVE RIGHT',cost: 60,  tiles: 1, dz: 0,  slope: 0, turn: 1,  spine: true },
+    gentleUp: { name: 'GENTLE UP',  cost: 58,  tiles: 1, dz: 1,  slope: 1,  spine: true },
+    gentleDn: { name: 'GENTLE DOWN',cost: 52,  tiles: 1, dz: -1, slope: -1, spine: true },
+    steepUp:  { name: 'STEEP UP',   cost: 80,  tiles: 1, dz: 2,  slope: 2,  spine: true },
+    steepDn:  { name: 'STEEP DOWN', cost: 70,  tiles: 1, dz: -2, slope: -2, spine: true },
+    lift:     { name: 'CHAIN LIFT', cost: 92,  tiles: 1, dz: 1,  slope: 1, chain: true, spine: true },
+    brake:    { name: 'BRAKES',     cost: 64,  tiles: 1, dz: 0,  slope: 0, brake: true, spine: true }
   }
 };
 var PIECE_PALETTES = {
   coaster: ['straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
             'steepUp', 'steepDn', 'lift', 'brake', 'loop'],
   flume:   ['straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
-            'lift', 'splash']
+            'lift', 'splash'],
+  invert:  ['straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
+            'steepUp', 'steepDn', 'lift', 'brake', 'loop', 'corkscrew']
 };
+
+/* ── inversions ─────────────────────────────────────────────────────────
+   An inversion is a run of track that is atomic in the graph: several
+   sections sharing one element id, laid and lifted together, so the chain
+   can never end half way through one.
+
+   Every entry is a centreline generator over the whole element plus the
+   parameters that size it, and the geometry lives here and nowhere else.
+   There is no roll term: the frame is parallel-transported along the
+   centreline, so a curve that turns over turns the train over with it. That
+   is how the vertical loop has always worked, and a corkscrew is the same
+   trick about a different axis — a helix, which is what a corkscrew is. */
+var INVERSION_TYPES = {
+  loop: {
+    name: 'LOOP', cost: 110, minSections: 4, maxSections: 8, step: 1,
+    /* One tile of ground for a tight loop, two for a big one; the section
+       count is what makes it tall. */
+    advance: function (n) { return n <= 5 ? 1 : 2; },
+    apex: function (n) { return 1.9 + n * 0.33; },
+    curve: function (n) {
+      var A = this.advance(n), H = this.apex(n);
+      // a circle in the along-and-up plane, with a forward wobble so it comes
+      // out ahead of where it went in instead of biting its own tail
+      return function (s) {
+        var phi = s * Math.PI * 2;
+        return { u: -0.5 + A * s + 0.45 * Math.sin(phi), v: 0,
+                 w: (H / 2) * (1 - Math.cos(phi)) };
+      };
+    }
+  },
+  corkscrew: {
+    name: 'CORKSCREW', cost: 86, minSections: 4, maxSections: 12, step: 4,
+    radius: 0.85,
+    /* A tile of ground per section, and one full turn per four of them, so
+       the drag buys a single, double or triple. */
+    advance: function (n) { return n; },
+    apex: function () { return 4 * this.radius; },
+    curve: function (n) {
+      var A = this.advance(n), K = n / 4, R = this.radius;
+      return function (s) {
+        var phi = s * Math.PI * 2 * K;
+        // vertical radius is twice the horizontal one because a tile across is
+        // two levels up, which is what makes the helix round rather than oval
+        return { u: -0.5 + A * s, v: R * Math.sin(phi), w: 2 * R * (1 - Math.cos(phi)) };
+      };
+    }
+  }
+};
+function isInversion(id) { return !!INVERSION_TYPES[id]; }
+function defaultSections(id) {
+  var k = INVERSION_TYPES[id];
+  return k ? k.minSections : 0;
+}
+/* Drag length picks a size, but only sizes the element actually comes in:
+   a corkscrew goes up four sections at a time because four is one full turn. */
+function clampSections(id, n) {
+  var k = INVERSION_TYPES[id];
+  if (!k) return 0;
+  var steps = Math.round((n - k.minSections) / k.step);
+  return clamp(k.minSections + steps * k.step, k.minSections, k.maxSections);
+}
+function inversionSizes(kind) {
+  var out = [];
+  for (var n = kind.minSections; n <= kind.maxSections; n += kind.step) out.push(n);
+  return out;
+}
+
+/* The sections of one element, as piece definitions. Each is an ordinary
+   piece to everything downstream — it has an exit, cells and a shape — and
+   carries the element it belongs to so the chain can be lifted as a unit.
+   Ground advance is spread across the sections, front and back first, so a
+   loop stacks several sections over one or two squares while a corkscrew
+   takes a square each. */
+function inversionSections(kindId, n) {
+  var kind = INVERSION_TYPES[kindId];
+  var A = kind.advance(n), curve = kind.curve(n), i;
+  var steps = [];
+  for (i = 0; i < n; i++) steps.push(0);
+  for (var a = 0; a < A; a++) steps[Math.round(a * (n - 1) / Math.max(1, A - 1))] = 1;
+
+  var out = [], off = 0;
+  for (i = 0; i < n; i++) {
+    out.push({
+      name: kind.name, cost: kind.cost, tiles: steps[i], dz: 0, slope: 0,
+      spine: true,
+      // one element is one inversion as far as the ratings are concerned
+      inversion: i === 0,
+      element: kindId, part: i, of: n,
+      curve: (function (s0, s1, o) {
+        return function (t) {
+          var q = curve(s0 + (s1 - s0) * t);
+          return { u: q.u - o, v: q.v, w: q.w };
+        };
+      })(i / n, (i + 1) / n, off)
+    });
+    off += steps[i];
+  }
+  return out;
+}
+/* A stored piece's definition. An inversion section is generated rather than
+   looked up, so anything reading a piece back off a ride asks this. */
+function pieceDefOf(ride, p) {
+  if (p.element) return inversionSections(p.element, p.of)[p.part];
+  return pieceDef(ride, p.type);
+}
 function pieceSet(ride) { return PIECE_SETS[rideType(ride.typeId).pieceSet]; }
 function pieceDef(ride, id) { return pieceSet(ride)[id]; }
 
 /* Piece shape. t runs 0..1 from the entry edge to the exit edge. Unchanged
    from the original beyond taking the definition instead of a global id. */
 function pathFn(def) {
+  if (def.curve) return def.curve;      // an inversion section brings its own
   if (def.turn) {
     var s = def.turn;
     return function (t) {
@@ -2077,15 +2260,46 @@ function pieceExit(def, x, y, z, d) {
   return { x: x + DX[d] * def.tiles, y: y + DY[d] * def.tiles, z: z + def.dz, d: d };
 }
 
-/* Cells the piece sits in, with the height band it needs there. */
-function pieceCells(def, x, y, z, d) {
-  var cells = [];
-  if (def.turn) return [{ x: x, y: y, z0: z, z1: z }];
-  for (var i = 0; i < def.tiles; i++) {
+/* Cells the piece sits in, with the height band it needs there.
+
+   `rail` is where the track itself is lowest; `z0` is the lowest the ride
+   needs the square kept clear. For a train that sits on the rail they are the
+   same. For one that hangs under it, z0 is a step lower — that step is the
+   envelope the train swings through, and putting it in the band is the whole
+   of the clearance rule: the underground test, the piece-against-piece test,
+   and everything that clears against trackOverhead all read this band and so
+   all keep out of it without being told separately. */
+function pieceCells(def, x, y, z, d, mount) {
+  var cells = [], drop = mount === 'below' ? 1 : 0, i;
+
+  /* A section with a shape of its own is walked rather than stepped: the
+     squares it covers and how high it is over each of them both come from
+     the curve, which is the only thing that knows. */
+  if (def.curve) {
+    var right = (d + 1) % 4, seen = {}, N = 48;
+    for (i = 0; i <= N; i++) {
+      var q = def.curve(i / N);
+      var cx = Math.round(x + q.u * DX[d] + q.v * DX[right]);
+      var cy = Math.round(y + q.u * DY[d] + q.v * DY[right]);
+      var key = cx + ',' + cy, zz = z + q.w, cell = seen[key];
+      if (!cell) {
+        cell = seen[key] = { x: cx, y: cy, z0: zz, z1: zz, rail: zz };
+        cells.push(cell);
+      }
+      if (zz < cell.rail) { cell.rail = zz; cell.z0 = zz; }
+      if (zz > cell.z1) cell.z1 = zz;
+    }
+    for (i = 0; i < cells.length; i++) cells[i].z0 -= drop;
+    return cells;
+  }
+
+  if (def.turn) return [{ x: x, y: y, z0: z - drop, z1: z, rail: z }];
+  for (i = 0; i < def.tiles; i++) {
     var za = z + def.dz * (i / def.tiles), zb = z + def.dz * ((i + 1) / def.tiles);
+    var lo = Math.min(za, zb);
     cells.push({
       x: x + DX[d] * i, y: y + DY[d] * i,
-      z0: Math.min(za, zb), z1: def.top ? z + def.top : Math.max(za, zb)
+      z0: lo - drop, z1: def.top ? z + def.top : Math.max(za, zb), rail: lo
     });
   }
   return cells;
@@ -2093,31 +2307,100 @@ function pieceCells(def, x, y, z, d) {
 
 function lastSlope(ride) {
   var p = ride.pieces[ride.pieces.length - 1];
-  return p ? (pieceDef(ride, p.type).slope || 0) : 0;
+  return p ? (pieceDefOf(ride, p).slope || 0) : 0;
 }
 
-/* The chain closes when the piece's exit lines up exactly with the station's
+/* The run of sections a placement would lay down, chained off the cursor. An
+   ordinary piece is a run of one; an inversion is a run of several, and the
+   whole run stands or falls together. */
+function plannedRun(ride, id, n) {
+  var mount = rideType(ride.typeId).mount;
+  var defs = isInversion(id) ? inversionSections(id, n) : [pieceDef(ride, id)];
+  var steps = [], cost = 0, c = ride.cursor;
+  for (var i = 0; i < defs.length; i++) {
+    var def = defs[i];
+    steps.push({ def: def, x: c.x, y: c.y, z: c.z, d: c.d,
+                 cells: pieceCells(def, c.x, c.y, c.z, c.d, mount) });
+    cost += def.cost;
+    c = pieceExit(def, c.x, c.y, c.z, c.d);
+  }
+  return { steps: steps, exit: c, cost: cost };
+}
+
+/* The chain closes when the run's exit lines up exactly with the station's
    entry - same tile, same height, same direction. */
-function closesCircuit(ride, id) {
-  var c = ride.cursor, s = ride.station;
-  var ex = pieceExit(pieceDef(ride, id), c.x, c.y, c.z, c.d);
+function closesCircuit(ride, id, n) {
+  var s = ride.station, ex = plannedRun(ride, id, n).exit;
   return ex.x === s.x && ex.y === s.y && ex.z === s.z && ex.d === s.d;
+}
+
+/* How much of the end of the chain the next run is continuous with: the piece
+   it starts from, the whole element if that piece belongs to one, and the
+   piece before that, which a curve's spill can still reach. */
+function mine_trailing(ride) {
+  var n = ride.pieces.length;
+  if (!n) return 0;
+  var last = ride.pieces[n - 1], k = 1;
+  if (last.elementId) {
+    while (k < n && ride.pieces[n - 1 - k].elementId === last.elementId) k++;
+  }
+  return Math.min(n, k + 1);
+}
+
+/* How fast the train is still going over the top of an inversion. It crests
+   the highest point of the circuit at about lift speed and trades height for
+   speed from there; the factor stands for what friction takes on the way,
+   which is not worth integrating for a number read off a ghost mid-drag.
+   Deliberately an estimate, and deliberately a pessimistic one. */
+var APEX_LOSS = 0.9;
+function crestHeight(ride) {
+  var hi = ride.station ? ride.station.z : 0;
+  for (var i = 0; i < ride.pieces.length; i++) {
+    var cells = ride.pieces[i].cells;
+    for (var c = 0; c < cells.length; c++) hi = Math.max(hi, cells[c].z1);
+  }
+  return hi;
+}
+function apexSpeed(ride, apexZ) {
+  var P = ridePhysics(ride);
+  var dropM = (crestHeight(ride) - apexZ) * P.levelMetres;
+  var v2 = P.liftSpeed * P.liftSpeed + 2 * P.gravity * dropM;
+  return v2 > 0 ? Math.sqrt(v2) * APEX_LOSS : 0;
 }
 
 /* Can this piece go on the end of the chain? Returns a reason so the palette
    can grey itself out and say why. */
-function checkPiece(ride, id) {
+function checkPiece(ride, id, n) {
   if (ride.complete) return 'CIRCUIT IS FINISHED';
-  var def = pieceDef(ride, id), c = ride.cursor;
-  if (def.cost > park.cash) return 'NOT ENOUGH MONEY';
-  if (Math.abs((def.slope || 0) - lastSlope(ride)) > 1) return 'SLOPE CHANGES TOO FAST';
+  var type = rideType(ride.typeId);
+  var run = plannedRun(ride, id, n);
+  var first = run.steps[0].def;
+  if (run.cost > park.cash) return 'NOT ENOUGH MONEY';
+  if (Math.abs((first.slope || 0) - lastSlope(ride)) > 1) return 'SLOPE CHANGES TOO FAST';
 
-  var cells = pieceCells(def, c.x, c.y, c.z, c.d);
+  for (var st = 0; st < run.steps.length; st++) {
+    var why = checkRunStep(ride, type, run, st, id, n);
+    if (why) return why;
+  }
+  return null;
+}
+
+/* One section of a planned run against the world. Split out because an
+   inversion is several of these and every one of them has to hold. */
+function checkRunStep(ride, type, run, at, id, n) {
+  var cells = run.steps[at].cells;
   for (var i = 0; i < cells.length; i++) {
     var cell = cells[i];
     var t = tileAt(cell.x, cell.y);
     if (!t) return 'OFF THE EDGE OF THE MAP';
     if (!t.owned) return 'YOU DO NOT OWN THAT LAND';
+    /* A train that hangs needs room under the rail, and there is none this
+       close to the ground. Checked against the rail rather than the reserved
+       band, so the message is about where the track is, not where the train
+       swings. */
+    if (type.mount === 'below' && cell.rail < type.minTrackElevation) {
+      return 'TRACK TOO LOW FOR HANGING TRAINS';
+    }
     /* The overlap sweep below compares piece against piece, so a ride that
        holds its ground by footprint instead was invisible to it and track
        could be threaded straight through a flat ride.
@@ -2136,31 +2419,54 @@ function checkPiece(ride, id) {
     if (t.path && cell.z0 < t.path.level + 1) return 'A PATH IS IN THE WAY';
     if (cell.z1 > MAX_Z + 4) return 'TOO HIGH FOR THE PARK';
   }
-  var ex = pieceExit(def, c.x, c.y, c.z, c.d);
-  var et = tileAt(ex.x, ex.y);
-  if (!et) return 'OFF THE EDGE OF THE MAP';
 
-  var s = ride.station;
-  if (ex.x === s.x && ex.y === s.y) {
-    if (ex.z !== s.z || ex.d !== s.d) {
-      if (Math.abs(ex.z - s.z) <= 2) return 'RIGHT SPOT, WRONG HEIGHT OR WAY ROUND';
-    } else if ((def.slope || 0) !== 0) {
-      return 'COME INTO THE STATION ON THE FLAT';
+  /* An inversion has to be entered fast enough to get over the top of it.
+     Said here, while the ghost is on screen, because a train that cannot make
+     it round is invisible until it happens and reads as a broken builder. */
+  var def = run.steps[at].def;
+  if (def.inversion) {
+    var apex = 0;
+    for (var q = 0; q < cells.length; q++) apex = Math.max(apex, cells[q].z1);
+    if (apexSpeed(ride, apex) < ridePhysics(ride).apexSpeed) {
+      return 'TRAIN WILL STALL IN THE LOOP';
     }
   }
 
-  // Overlaps: track may cross itself, but only with two levels of clearance.
-  // Another ride's track is never crossable at all.
+  var last = at === run.steps.length - 1;
+  var ex = last ? run.exit : null;
+  if (last) {
+    var et = tileAt(ex.x, ex.y);
+    if (!et) return 'OFF THE EDGE OF THE MAP';
+    var s = ride.station;
+    if (ex.x === s.x && ex.y === s.y) {
+      if (ex.z !== s.z || ex.d !== s.d) {
+        if (Math.abs(ex.z - s.z) <= 2) return 'RIGHT SPOT, WRONG HEIGHT OR WAY ROUND';
+      } else if ((def.slope || 0) !== 0) {
+        return 'COME INTO THE STATION ON THE FLAT';
+      }
+    }
+  }
+
+  /* Overlaps: track may cross itself, but only with two levels of clearance.
+     Another ride's track is never crossable at all.
+
+     The stretch the run grows out of is exempt. An element follows a curve
+     rather than a straight line down its squares, so its sections spill into
+     the ones either side — including the square the next piece starts on.
+     That is continuous track, not a crossing, and treating it as one made a
+     corkscrew unplaceable after a loop. */
+  var exempt = mine_trailing(ride);
   for (var r = 0; r < rides.length; r++) {
     var other = rides[r], mine = other === ride;
     for (var p = 0; p < other.pieces.length; p++) {
+      if (mine && p >= other.pieces.length - exempt) continue;
       var pc = other.pieces[p].cells;
       for (var a = 0; a < pc.length; a++) for (var b = 0; b < cells.length; b++) {
         if (pc[a].x !== cells[b].x || pc[a].y !== cells[b].y) continue;
         if (!mine) return 'ANOTHER RIDE IS IN THE WAY';
         if (cells[b].z0 - pc[a].z1 >= 2 || pc[a].z0 - cells[b].z1 >= 2) continue;
         // landing back on the station entry is how you finish, not a clash
-        if (p === 0 && closesCircuit(ride, id)) continue;
+        if (p === 0 && closesCircuit(ride, id, n)) continue;
         return 'SOMETHING IS IN THE WAY';
       }
     }
@@ -2168,9 +2474,16 @@ function checkPiece(ride, id) {
   return null;
 }
 
-function addPiece(ride, id, x, y, z, d) {
-  var def = pieceDef(ride, id);
-  var piece = { type: id, x: x, y: y, z: z, d: d, cells: pieceCells(def, x, y, z, d) };
+/* elem, when given, says which element this section belongs to and where in
+   it. It is stored on the piece because that is what makes the run atomic
+   afterwards: the section's shape is generated back from it, and the whole
+   group is lifted together or not at all. */
+function addPiece(ride, id, x, y, z, d, elem) {
+  var mount = rideType(ride.typeId).mount;
+  var piece = { type: id, x: x, y: y, z: z, d: d };
+  if (elem) { piece.element = elem.kind; piece.part = elem.part; piece.of = elem.of;
+              piece.elementId = elem.id; }
+  piece.cells = pieceCells(pieceDefOf(ride, piece), x, y, z, d, mount);
   ride.pieces.push(piece);
   for (var i = 0; i < piece.cells.length; i++) {
     var t = tileAt(piece.cells[i].x, piece.cells[i].y);
@@ -2179,16 +2492,22 @@ function addPiece(ride, id, x, y, z, d) {
   return piece;
 }
 
-function placeRidePiece(ride, id) {
-  var why = checkPiece(ride, id);
+var nextElementId = 1;
+function placeRidePiece(ride, id, n) {
+  var why = checkPiece(ride, id, n);
   if (why) { toast(why); sfxDeny(); return false; }
-  var c = ride.cursor, def = pieceDef(ride, id);
-  addPiece(ride, id, c.x, c.y, c.z, c.d);
-  park.cash -= def.cost;
-  park.books.building += def.cost;
-  ride.spent = (ride.spent || 0) + def.cost;
-  var closed = closesCircuit(ride, id);
-  ride.cursor = pieceExit(def, c.x, c.y, c.z, c.d);
+  var run = plannedRun(ride, id, n);
+  var eid = isInversion(id) ? nextElementId++ : null;
+  for (var k = 0; k < run.steps.length; k++) {
+    var s = run.steps[k];
+    addPiece(ride, id, s.x, s.y, s.z, s.d,
+             eid === null ? null : { kind: id, part: k, of: run.steps.length, id: eid });
+  }
+  park.cash -= run.cost;
+  park.books.building += run.cost;
+  ride.spent = (ride.spent || 0) + run.cost;
+  var closed = closesCircuit(ride, id, n);
+  ride.cursor = run.exit;
   if (closed) {
     ride.complete = true;
     sfxGood();
@@ -2200,11 +2519,22 @@ function placeRidePiece(ride, id) {
   return true;
 }
 
+/* An inversion comes up as one thing. Every section of it shares an element
+   id, and lifting any of them lifts all of them — which is also why the chain
+   can never be left ending half way round a loop. */
 function undoRidePiece(ride) {
   if (ride.pieces.length <= 1) { toast('THE STATION STAYS PUT'); return; }
-  var piece = ride.pieces.pop();
-  park.cash += pieceDef(ride, piece.type).cost;
-  ride.spent = Math.max(0, (ride.spent || 0) - pieceDef(ride, piece.type).cost);
+  var last = ride.pieces[ride.pieces.length - 1];
+  var group = last.elementId ? last.elementId : null;
+  var piece = null, back = 0;
+  do {
+    if (ride.pieces.length <= 1) break;
+    piece = ride.pieces.pop();
+    back += pieceDefOf(ride, piece).cost;
+  } while (group && ride.pieces.length > 1 &&
+           ride.pieces[ride.pieces.length - 1].elementId === group);
+  park.cash += back;
+  ride.spent = Math.max(0, (ride.spent || 0) - back);
   ride.cursor = { x: piece.x, y: piece.y, z: piece.z, d: piece.d };
   ride.complete = false;
   ride.tested = false;
@@ -2483,6 +2813,15 @@ function createRide(typeId, x, y, d) {
   if (!plan.ok) { toast(plan.why); return null; }
   if (park.cash < plan.cost) { toast('CANNOT AFFORD IT: SHORT BY ' + money(plan.cost - park.cash)); return null; }
   var type = rideType(typeId);
+  /* A hanging train boards from a platform it hangs beside, so the rail runs
+     a level above the ground rather than on it — otherwise the very first
+     piece of track has its envelope in the dirt and the ride can never be
+     started at all. */
+  var railZ = type.mount === 'below' ? plan.z + 1 : plan.z;
+  if (type.mount === 'below' && railZ < type.minTrackElevation) {
+    toast('TRACK TOO LOW FOR HANGING TRAINS');
+    return null;
+  }
   var n = 1;
   for (var i = 0; i < rides.length; i++) if (rides[i].typeId === typeId) n++;
   var ride = {
@@ -2490,7 +2829,7 @@ function createRide(typeId, x, y, d) {
     name: 'THRILLSBURY ' + type.name.split(' ').pop() + ' ' + n,
     typeId: typeId,
     pieces: [],
-    station: { x: x, y: y, z: plan.z, d: d },
+    station: { x: x, y: y, z: railZ, d: d },
     cursor: null,
     complete: false,
     entranceTile: null, exitTile: null,
@@ -2504,8 +2843,8 @@ function createRide(typeId, x, y, d) {
     var t = tileAt(plan.cells[c].x, plan.cells[c].y);
     if (t.object && t.object.type === 'tree') t.object = null;
   }
-  addPiece(ride, 'station', x, y, plan.z, d);
-  ride.cursor = pieceExit(pieceDef(ride, 'station'), x, y, plan.z, d);
+  addPiece(ride, 'station', x, y, railZ, d);
+  ride.cursor = pieceExit(pieceDef(ride, 'station'), x, y, railZ, d);
   park.cash -= plan.cost;
   park.books.building += plan.cost;
   toast(ride.name + ' STARTED');
@@ -2893,9 +3232,9 @@ function buildRidePath(ride) {
   var pts = [], owner = [], i, k;
 
   for (i = 0; i < ride.pieces.length; i++) {
-    var p = ride.pieces[i], def = PIECE_SETS[set][p.type], f = pathFn(def);
+    var p = ride.pieces[i], def = pieceDefOf(ride, p), f = pathFn(def);
     var right = (p.d + 1) % 4;
-    var M = Math.max(10, Math.round(P.sampleStep * def.tiles));
+    var M = Math.max(10, Math.round(P.sampleStep * Math.max(1, def.tiles)));
     for (k = (i === 0 ? 0 : 1); k <= M; k++) {
       var q = f(k / M);
       pts.push({
@@ -2967,7 +3306,7 @@ function pathGeometry(ride, pts) {
   for (i = 0; i < drops.length; i++) biggest = Math.max(biggest, drops[i]);
   var inversions = 0, turns = 0, kinds = {};
   for (i = 0; i < ride.pieces.length; i++) {
-    var def = PIECE_SETS[set][ride.pieces[i].type];
+    var def = pieceDefOf(ride, ride.pieces[i]);
     if (def.inversion) inversions++;
     if (def.turn) turns++;
     kinds[ride.pieces[i].type] = 1;
@@ -3084,7 +3423,7 @@ function stepSim(dt) {
   var ride = sim.ride, P = ridePhysics(ride);
   var set = rideType(ride.typeId).pieceSet;
   var st = sampleAt(sim.s);
-  var def = PIECE_SETS[set][ride.pieces[st.owner].type];
+  var def = pieceDefOf(ride, ride.pieces[st.owner]);
   checkSplash(ride, sim, st.owner, st, sim.v);
 
   // the chain only pulls a train that is still going forwards, or one that
@@ -3151,16 +3490,61 @@ function projectDir(tx, ty, lz) {
   return { x: (drx - dry) * HW, y: (drx + dry) * HH - lz * ZH };
 }
 
+/* A hanging train needs the space under the rail, so nothing may stand
+   there. The column goes up beside the track and reaches over it, and there
+   is one every second square rather than every square — a forest of them
+   under an inverter reads as scaffolding. */
+var COLUMN_EVERY = 2, COLUMN_OUT = 0.85;
+function drawHangingSupports(g, ride, p, def, f, tint) {
+  var right = (p.d + 1) % 4;
+  var n = Math.max(1, def.tiles);
+  for (var i = 0; i < n; i++) {
+    // spaced along the whole ride, not restarted at every piece
+    var along = p.x * DX[p.d] + p.y * DY[p.d] + i;
+    if (((along % COLUMN_EVERY) + COLUMN_EVERY) % COLUMN_EVERY !== 0) continue;
+    var q = f((i + 0.5) / n);
+    var wx = p.x + q.u * DX[p.d] + q.v * DX[right];
+    var wy = p.y + q.u * DY[p.d] + q.v * DY[right];
+    var zz = p.z + q.w;
+    var cx = clamp(Math.round(wx), 0, WORLD - 1), cy = clamp(Math.round(wy), 0, WORLD - 1);
+    var gh = world.tiles[idx(cx, cy)].h;
+    if (zz - gh < 1.2) continue;
+    // the foot stands off to one side, clear of the train's swing
+    var fx = wx + COLUMN_OUT * DX[right], fy = wy + COLUMN_OUT * DY[right];
+    var frx = rotX(fx, fy), fry = rotY(fx, fy);
+    var sxF = Math.round((frx - fry) * HW + cam.x + HW);
+    var topF = Math.round((frx + fry) * HH - zz * ZH + cam.y + HH);
+    var footF = Math.round((frx + fry) * HH - gh * ZH + cam.y + HH + 4);
+    if (footF <= topF) continue;
+    g.fillStyle = tint || PAL.rockD;
+    g.fillRect(sxF - 1, topF, 3, footF - topF);
+    g.fillStyle = tint || PAL.rockM;
+    g.fillRect(sxF - 1, topF, 1, footF - topF);
+    // and the arm reaches back over the rail
+    var rrx = rotX(wx, wy), rry = rotY(wx, wy);
+    var sxR = Math.round((rrx - rry) * HW + cam.x + HW);
+    var topR = Math.round((rrx + rry) * HH - zz * ZH + cam.y + HH);
+    var x0 = Math.min(sxF, sxR), x1 = Math.max(sxF, sxR);
+    g.fillStyle = tint || PAL.rockD;
+    g.fillRect(x0, Math.min(topF, topR) - 2, x1 - x0 + 2, 2);
+    g.fillStyle = tint || PAL.rockM;
+    g.fillRect(x0, Math.min(topF, topR) - 2, x1 - x0 + 2, 1);
+  }
+}
+
 var CAR_COLS = ['#e0402c', '#d03a2a', '#c03626', '#b03222'];
 
 function drawCar(g, ride, st, idx, full) {
   var P = ridePhysics(ride);
+  var type = rideType(ride.typeId);
   var pos = projectWorld(ride, st.x, st.y, st.z);
   var d = projectDir(st.t.x / P.tileMetres, st.t.y / P.tileMetres, st.t.z / P.levelMetres);
   var m = Math.hypot(d.x, d.y) || 1;
   var nx = d.x / m, ny = d.y / m;
   var col = CAR_COLS[idx % CAR_COLS.length];
   var inverted = st.u.z < -0.25;
+
+  if (type.mount === 'below') { drawHangingCar(g, pos, nx, ny, inverted, full, type); return; }
 
   for (var i = -5; i <= 5; i++) {
     var x = Math.round(pos.sx + nx * i * 0.95), y = Math.round(pos.sy + ny * i * 0.95);
@@ -3169,6 +3553,34 @@ function drawCar(g, ride, st, idx, full) {
     g.fillStyle = shadeHex(col, 1.3); g.fillRect(x, y - 5, 1, 1);
     if (!inverted && full && (i === -3 || i === 1)) {
       g.fillStyle = '#e8c49a'; g.fillRect(x, y - 7, 1, 2);
+    }
+  }
+}
+
+/* Hanging under the rail rather than sitting on it: the car body is a step
+   below the spine, with the riders' legs loose beneath it. Small at this
+   angle, but it is the entire visual read of the ride — a train drawn on top
+   of the track is just a coaster in another colour.
+
+   When the track turns over, so does the whole arrangement: the body goes
+   above the rail and the legs point up. */
+function drawHangingCar(g, pos, nx, ny, inverted, full, type) {
+  var flip = inverted ? -1 : 1;
+  var hang = ZH * flip;                     // one elevation step off the spine
+  var body = shadeHex(type.accent || '#9b4dd8', 0.75);
+  var bodyL = type.accent || '#9b4dd8';
+  for (var i = -5; i <= 5; i++) {
+    var x = Math.round(pos.sx + nx * i * 0.95);
+    var y = Math.round(pos.sy + ny * i * 0.95) + hang;
+    g.fillStyle = PAL.railD;                              // the hanger to the rail
+    g.fillRect(x, Math.round(y - hang), 1, Math.abs(hang) || 1);
+    g.fillStyle = body;  g.fillRect(x, y - 1, 1, 3);      // the car
+    g.fillStyle = bodyL; g.fillRect(x, y - 1, 1, 1);
+    if (full && (i === -3 || i === 1)) {
+      g.fillStyle = '#e8c49a';                            // a rider
+      g.fillRect(x, y + (inverted ? -4 : 2) * 1, 1, 2);
+      g.fillStyle = '#2f3238';                            // and their legs, loose
+      g.fillRect(x, y + (inverted ? -6 : 4), 1, 2);
     }
   }
 }
@@ -3232,8 +3644,7 @@ function checkSplash(ride, run, owner, st, v) {
   run.lastPiece = owner;
   if (was === undefined || was === owner) return;
   if (!ride.pieces[was] || !ride.pieces[owner]) return;
-  var set = PIECE_SETS[rideType(ride.typeId).pieceSet];
-  var from = set[ride.pieces[was].type], to = set[ride.pieces[owner].type];
+  var from = pieceDefOf(ride, ride.pieces[was]), to = pieceDefOf(ride, ride.pieces[owner]);
   if (!from.channel || !(from.slope < 0)) return;
   if ((to.slope || 0) < 0) return;                // still on the way down
   spawnSplash(ride, owner, st, v, -from.slope);
@@ -4099,7 +4510,7 @@ function stepRideRun(ride, run, ahead, dt) {
     if (pts[mid].s <= sPos) lo = mid; else hi = mid;
   }
   var st = pts[lo];
-  var def = PIECE_SETS[set][ride.pieces[run.path.owner[lo]].type];
+  var def = pieceDefOf(ride, ride.pieces[run.path.owner[lo]]);
   checkSplash(ride, run, run.path.owner[lo], st, run.v);
 
   run.v = propel(P, def, run.v, st.t.z, dt);
@@ -4637,7 +5048,9 @@ function layoutUI() {
                      x: bw.x + 5 + (pi % 5) * 24, y: bw.y + 17 + ((pi / 5) | 0) * 20,
                      w: 22, h: 18,
                      on: build.piece === pal[pi],
-                     disabled: !!checkPiece(build.ride, pal[pi]) });
+                     disabled: !!checkPiece(build.ride, pal[pi],
+                                            build.piece === pal[pi] ? build.sections
+                                                                    : defaultSections(pal[pi])) });
     }
     if (build.ride.complete) {
       buttons.push({ id: 'do_test', x: bw.x + 5, y: bw.y + 71, w: 52, h: 18, label: 'TEST' });
@@ -4844,6 +5257,7 @@ function rideAction(act, ride) {
                  : !ride.entranceTile ? 'entrance'
                  : !ride.exitTile ? 'exit' : 'track';
       build.piece = PIECE_PALETTES[rideType(ride.typeId).pieceSet][0];
+      build.sections = defaultSections(build.piece);
       build.cat = null;
       toast(build.mode === 'entrance' ? 'NOW THE WAY IN'
           : build.mode === 'exit' ? 'NOW THE WAY OUT'
@@ -4906,8 +5320,8 @@ function pressButton(b) {
     return;
   }
   if (b.piece) {                            // tap a selected piece again to lay it
-    if (build.piece === b.piece && build.ride) placeRidePiece(build.ride, b.piece);
-    else build.piece = b.piece;
+    if (build.piece === b.piece && build.ride) placeRidePiece(build.ride, b.piece, build.sections);
+    else { build.piece = b.piece; build.sections = defaultSections(b.piece); }
     layoutUI();
     return;
   }
@@ -4938,7 +5352,7 @@ function pressButton(b) {
     case 'sound': muted = !muted; if (!muted) initAudio(); layoutUI(); break;
     case 'notice_ok': dismissNotice(); break;
     case 'done':    disarm(); break;
-    case 'do_build': if (build.ride) placeRidePiece(build.ride, build.piece); break;
+    case 'do_build': if (build.ride) placeRidePiece(build.ride, build.piece, build.sections); break;
     case 'do_undo':  if (build.ride) undoRidePiece(build.ride); break;
     case 'do_test':  if (build.ride) startRun(build.ride, 'test'); break;
     case 'do_wayin':
@@ -4962,6 +5376,7 @@ function pressButton(b) {
         build.ride = made;
         build.mode = 'track';
         build.piece = PIECE_PALETTES[rideType(made.typeId).pieceSet][0];
+        build.sections = defaultSections(build.piece);
         build.station = null;
       }
       layoutUI();
@@ -5194,7 +5609,7 @@ function drawWorld(g) {
       }
 
       var tk = trackMap[w.x + ',' + w.y];
-      if (tk) for (var ti = 0; ti < tk.length; ti++) drawPiece(g, tk[ti].set, tk[ti].p);
+      if (tk) for (var ti = 0; ti < tk.length; ti++) drawPiece(g, tk[ti].ride, tk[ti].set, tk[ti].p);
 
       var deck = deckMap[w.x + ',' + w.y];
       if (deck) g.drawImage(SPR.deco.deck, sx, sy);
@@ -5299,7 +5714,7 @@ function buildTrackMap() {
     for (var i = 0; i < ride.pieces.length; i++) {
       var p = ride.pieces[i], best = anchorCell(p);
       var key = best.x + ',' + best.y;
-      (trackMap[key] || (trackMap[key] = [])).push({ p: p, set: setId });
+      (trackMap[key] || (trackMap[key] = [])).push({ p: p, set: setId, ride: ride });
     }
   }
   for (var k in trackMap) {
@@ -5564,14 +5979,21 @@ function drawShipBoat(g, ride, pt) {
   }
 }
 
-function drawPiece(g, setId, p, tint, alpha) {
+/* A section of an element is keyed by which element and which part of it, so
+   a four-section loop and an eight-section one do not share artwork. */
+function pieceArtKey(p) {
+  return p.element ? p.element + '.' + p.of + '.' + p.part : p.type;
+}
+function drawPiece(g, ride, setId, p, tint, alpha) {
+  var type = rideType(ride.typeId);
+  var def = pieceDefOf(ride, p);
   var sdir = (p.d - cam.rot + 4) % 4;
-  var spr = trackSprite(setId, p.type, sdir, tint);
+  var spr = trackSprite(setId, def, pieceArtKey(p), sdir, tint, type.accent);
   var rx = rotX(p.x, p.y), ry = rotY(p.x, p.y);
   var sx = (rx - ry) * HW + cam.x + HW;
   var sy = (rx + ry) * HH - p.z * ZH + cam.y + HH;
   if (alpha !== undefined) g.globalAlpha = alpha;
-  drawSupports(g, setId, p, tint);
+  drawSupports(g, ride, setId, p, tint);
   g.drawImage(spr.c, Math.round(sx + spr.ox), Math.round(sy + spr.oy));
   if (alpha !== undefined) g.globalAlpha = 1;
 }
@@ -5579,8 +6001,10 @@ function drawPiece(g, setId, p, tint, alpha) {
 /* Posts from the track down to whatever is underneath it. Drawn from the
    piece's height over the terrain rather than baked into the artwork, so a
    water ride's legs come free. */
-function drawSupports(g, setId, p, tint) {
-  var def = PIECE_SETS[setId][p.type], f = pathFn(def);
+function drawSupports(g, ride, setId, p, tint) {
+  var def = pieceDefOf(ride, p), f = pathFn(def);
+  var type = rideType(ride.typeId);
+  if (type.mount === 'below') { drawHangingSupports(g, ride, p, def, f, tint); return; }
   var right = (p.d + 1) % 4;
   var n = def.tiles;
   for (var i = 0; i < n; i++) {
@@ -5730,7 +6154,7 @@ function drawTrackGhost(g) {
                          (rx + ry) * HH - surfaceLevel(t) * ZH + cam.y, tint);
     }
     if (plan.ok) {
-      drawPiece(g, build.rideType.pieceSet,
+      drawPiece(g, { typeId: build.rideType.id }, build.rideType.pieceSet,
                 { type: 'station', x: build.station.x, y: build.station.y,
                   z: plan.z, d: build.station.d }, tint, 0.75);
     }
@@ -5760,19 +6184,24 @@ function drawTrackGhost(g) {
   }
 
   if (build.mode !== 'track' || ride.complete) return;
-  var why = checkPiece(ride, build.piece);
+  var why = checkPiece(ride, build.piece, build.sections);
   var tint2 = why ? PAL.ghostNo : PAL.ghostOK;
-  var c = ride.cursor;
-  var cells = pieceCells(pieceDef(ride, build.piece), c.x, c.y, c.z, c.d);
-  for (var k = 0; k < cells.length; k++) {
-    var cell = cells[k], ct = tileAt(cell.x, cell.y);
-    if (!ct) continue;
-    var crx = rotX(cell.x, cell.y), cry = rotY(cell.x, cell.y);
-    drawTileOutline(g, (crx - cry) * HW + cam.x,
-                       (crx + cry) * HH - ct.h * ZH + cam.y, tint2);
+  var run = plannedRun(ride, build.piece, build.sections);
+  var setId = rideType(ride.typeId).pieceSet;
+  var eKind = isInversion(build.piece) ? build.piece : null;
+  for (var st2 = 0; st2 < run.steps.length; st2++) {
+    var step = run.steps[st2], cells = step.cells;
+    for (var k = 0; k < cells.length; k++) {
+      var cell = cells[k], ct = tileAt(cell.x, cell.y);
+      if (!ct) continue;
+      var crx = rotX(cell.x, cell.y), cry = rotY(cell.x, cell.y);
+      drawTileOutline(g, (crx - cry) * HW + cam.x,
+                         (crx + cry) * HH - ct.h * ZH + cam.y, tint2);
+    }
+    drawPiece(g, ride, setId,
+              { type: build.piece, x: step.x, y: step.y, z: step.z, d: step.d,
+                element: eKind, part: st2, of: run.steps.length }, tint2, 0.8);
   }
-  drawPiece(g, rideType(ride.typeId).pieceSet,
-            { type: build.piece, x: c.x, y: c.y, z: c.z, d: c.d }, tint2, 0.8);
 }
 
 /* Piece icons: schematic side views, drawn as pixel lines. Ported as-is. */
@@ -5816,6 +6245,14 @@ function drawPieceIcon(g, type, bx, by, col) {
       }
       iconLine(g, x + 1, y + 9, x + 5, y + 9);
       iconLine(g, x + 11, y + 9, x + 15, y + 9);
+      break;
+    case 'corkscrew':
+      // a helix seen side on: a run of track with a twist through it
+      for (var c2 = 0; c2 <= 28; c2++) {
+        var ph = c2 / 28 * Math.PI * 2;
+        g.fillRect(Math.round(x + 1 + c2 * 13 / 28), Math.round(y + 5 - Math.cos(ph) * 4), 1, 1);
+        g.fillRect(Math.round(x + 1 + c2 * 13 / 28), Math.round(y + 5 + Math.cos(ph) * 4), 1, 1);
+      }
       break;
   }
 }
@@ -5947,11 +6384,14 @@ function drawRiverWinBody(g, win) {
 function drawBuildWinBody(g, win) {
   var ride = build.ride;
   if (!ride) return;
-  var def = pieceDef(ride, build.piece);
-  text(g, def.name, win.x + 5, win.y + 59, PAL.uiText);
-  textRight(g, money(def.cost), win.x + win.w - 5, win.y + 59, PAL.uiText);
+  var run = plannedRun(ride, build.piece, build.sections);
+  var def = run.steps[0].def;
+  var label = isInversion(build.piece)
+    ? def.name + ' x' + run.steps.length : def.name;
+  text(g, label, win.x + 5, win.y + 59, PAL.uiText);
+  textRight(g, money(run.cost), win.x + win.w - 5, win.y + 59, PAL.uiText);
 
-  var why = checkPiece(ride, build.piece);
+  var why = checkPiece(ride, build.piece, build.sections);
   var line, ink = PAL.uiDim;
   if (ride.complete) { line = 'CIRCUIT COMPLETE'; ink = '#12401c'; }
   else if (why) { line = why; ink = why === 'NOT ENOUGH MONEY' ? '#7a1f18' : '#7a4a10'; }
@@ -6434,6 +6874,14 @@ function onDown(e) {
       pointers.get(e.pointerId).winDrag = { id: bar.id, dx: u.x - bar.x, dy: u.y - bar.y };
       layoutUI();
     }
+    else if (build.mode === 'track' && build.ride && !build.ride.complete &&
+             isInversion(build.piece) && !winAt(u.x, u.y)) {
+      /* Drag to size the element, the same gesture as drawing a path: the
+         ghost grows through the sizes it comes in and lets go at the one you
+         stopped on. Nothing is committed until the finger lifts. */
+      pointers.get(e.pointerId).sizing = { x: e.clientX, y: e.clientY,
+                                           from: build.sections };
+    }
     else if (armed()) {
       // armed: one finger draws rather than pans
       var tl = pickTile(b.x, b.y);
@@ -6515,6 +6963,17 @@ function onMove(e) {
     return;
   }
 
+  if (p.sizing) {
+    /* Distance dragged, in whichever direction, buys sections. Twenty-odd
+       device pixels a step is far enough not to twitch and short enough that
+       the whole range is one comfortable sweep. */
+    var far = Math.hypot(e.clientX - p.sizing.x, e.clientY - p.sizing.y);
+    var want = clampSections(build.piece, p.sizing.from + Math.floor(far / 22));
+    if (want !== build.sections) { build.sections = want; layoutUI(); }
+    e.preventDefault();
+    return;
+  }
+
   if (p.drawing && build.stroke) {
     var pu2 = toUI(e);
     build.stroke.px = pu2.x; build.stroke.py = pu2.y;
@@ -6551,6 +7010,13 @@ function onUp(e) {
     return;
   }
   if (p.winDrag) { layoutUI(); e.preventDefault(); return; }
+  if (p.sizing) {
+    if (build.ride) placeRidePiece(build.ride, build.piece, build.sections);
+    build.sections = defaultSections(build.piece);
+    layoutUI();
+    e.preventDefault();
+    return;
+  }
   if (p.drawing) {                            // a tap while armed is a one-tile stroke
     commitStroke();
     e.preventDefault();
@@ -6564,6 +7030,7 @@ function onCancel(e) {
   var p = pointers.get(e.pointerId);
   if (p && p.btn) p.btn.pressed = false;
   if (p && p.drawing) build.stroke = null;
+  if (p && p.sizing) build.sections = defaultSections(build.piece);
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
 }
@@ -6769,7 +7236,13 @@ function serialiseRides() {
     var r = rides[i], pieces = [];
     for (var p = 0; p < r.pieces.length; p++) {
       var pc = r.pieces[p];
-      pieces.push([pc.type, pc.x, pc.y, pc.z, pc.d]);
+      /* An inversion section is meaningless on its own: which element it
+          belongs to, which part of it, and how many parts there are all have
+          to come back, or a loaded park has sections nothing can lift as a
+          unit and no way to regenerate their shape. */
+      pieces.push(pc.element
+        ? [pc.type, pc.x, pc.y, pc.z, pc.d, pc.element, pc.part, pc.of, pc.elementId]
+        : [pc.type, pc.x, pc.y, pc.z, pc.d]);
     }
     out.push({
       id: r.id, name: r.name, typeId: r.typeId, pieces: pieces,
@@ -6836,7 +7309,9 @@ function restoreRides(saved) {
     rides.push(r);
     for (var p = 0; p < d.pieces.length; p++) {
       var pc = d.pieces[p];
-      addPiece(r, pc[0], pc[1], pc[2], pc[3], pc[4]);
+      addPiece(r, pc[0], pc[1], pc[2], pc[3], pc[4],
+               pc.length > 5 ? { kind: pc[5], part: pc[6], of: pc[7], id: pc[8] } : null);
+      if (pc.length > 5) nextElementId = Math.max(nextElementId, (pc[8] || 0) + 1);
     }
     reclaimTiles(r);
   }
@@ -6905,7 +7380,14 @@ function migrate(save) {
        is what every stretch of a version 6 river was. */
     save.v = 7;
   }
-  // future: if (save.v === 7) { ...upgrade to 8...; save.v = 8; }
+  if (save.v === 7) {                             // 7 → 8: inversions arrived
+    /* Version 7 wrote five numbers a piece and had no elements in it, so a
+       five-long entry restores as an ordinary piece and there is nothing to
+       carry. The gate is here because a park saved by this build writes nine
+       for an inversion section, and an older reader must not try. */
+    save.v = 8;
+  }
+  // future: if (save.v === 8) { ...upgrade to 9...; save.v = 9; }
   if (save.v !== SAVE_VERSION) return null;
   if (save.world !== WORLD) return null;          // world resized under it
   if (!save.h || save.h.length !== WORLD * WORLD) return null;
