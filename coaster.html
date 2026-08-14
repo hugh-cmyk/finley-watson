@@ -3473,8 +3473,43 @@ function walkTo(g, x, y, target) {
   return true;
 }
 
+/* The walk graph is made of footpaths, so a guest standing on anything else
+   can route nowhere. That happens honestly — a door is not a path tile and a
+   guest stands on one to queue — but the ways back off a door all end here:
+   the ride turned them away, or they got tired of waiting. Without this they
+   stay on that square for the rest of the park's life, unable to ride, shop
+   or go home, and every one of them holds a place against the crowd limit
+   until nobody new can get in at all. */
+function backOnPath(g) {
+  var x = Math.round(g.x), y = Math.round(g.y);
+  var here = tileAt(x, y);
+  if (here && here.path) return true;
+  var spot = approachTile(x, y) || approachTile(x, y, true);
+  if (!spot) return false;
+  g.x = spot.x; g.y = spot.y;
+  var t = tileAt(spot.x, spot.y);
+  if (t) g.level = t.path ? t.path.level : t.h;
+  return true;
+}
+
 function decide(g) {
   if (g.state === 'queue' || g.state === 'ride') return;
+  backOnPath(g);
+
+  /* Going home is decided before anything else, and nothing outranks it.
+     Needs come round again for as long as a guest is in the park — thirst
+     every hundred seconds or so — so with a stall to walk to, somebody whose
+     day ended hours ago would set off for it instead of the gate, every time,
+     for ever. Worse, a need that cannot be met at all keeps them for ever
+     too: one toilet with a queue of four turns most of them away, and a
+     hundred people who are never going to get in are also a hundred people
+     who are never going to go home. They can find a lavatory on the way. */
+  if ((g.visit <= 0 || g.happiness < 24) &&
+      walkTo(g, world.entrance.x, world.entrance.y, { kind: 'out' })) {
+    g.state = 'leave';
+    return;
+  }
+
   var need = null;
   if (g.bladder > 82) need = 'bladder';
   else if (g.nausea > 65) need = 'nausea';
