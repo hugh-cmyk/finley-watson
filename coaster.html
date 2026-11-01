@@ -125,7 +125,7 @@ var START_CASH = 10000;                         // what you start a park with
 var SAVE_KEY = 'finley-coaster-park', BEST_KEY = 'finley-coaster-best';
 var ARCHIVE_KEY = 'finley-coaster-park-v1-archive';
 var NOTICE_KEY = 'finley-coaster-v1-notice-seen';
-var SAVE_VERSION = 8;   // 1 single-coaster, 2 no paths, 3 rides, 4 flat, 5 rivers, 6 rapids, 7 inversions
+var SAVE_VERSION = 9;   // 1 single-coaster, 2 no paths, 3 rides, 4 flat, 5 rivers, 6 rapids, 7 inversions, 8 launches
 
 var PAL = {
   vd:     '#16202a',   // void beyond the world
@@ -764,6 +764,18 @@ function trackSprite(setId, def, keyId, sdir, tint, accent) {
   }
   function proj(u, v, w) { return { x: (u - v) * HW, y: (u + v) * HH - w * ZH }; }
 
+  /* A tall steel piece covers far more screen than its squares suggest, and
+     sampled by squares its upright stretch comes out dotted. */
+  if (def.steel) {
+    var span = 0, prev = proj(f(0).u, f(0).v, f(0).w);
+    for (i = 1; i <= 64; i++) {
+      var pp0 = f(i / 64), pj = proj(pp0.u, pp0.v, pp0.w);
+      span += Math.hypot(pj.x - prev.x, pj.y - prev.y);
+      prev = pj;
+    }
+    STEPS = Math.max(STEPS, Math.ceil(span * 1.6));
+  }
+
   var samples = [], i;
   for (i = 0; i <= STEPS; i++) {
     var t = i / STEPS, p = f(t);
@@ -771,7 +783,10 @@ function trackSprite(setId, def, keyId, sdir, tint, accent) {
     var pa = f(Math.max(0, t - 0.004)), pb = f(Math.min(1, t + 0.004));
     var qa = rotUV(pa.u, pa.v, sdir), qb = rotUV(pb.u, pb.v, sdir);
     var du = qb.u - qa.u, dv = qb.v - qa.v, m = Math.hypot(du, dv) || 1;
-    samples.push({ u: q.u, v: q.v, w: p.w, nu: -dv / m, nv: du / m });
+    // straight up has no heading on the ground; the rails still lie across
+    // the way the piece faces
+    if (def.steel && Math.hypot(du, dv) < 1e-6) { var fw = rotUV(1, 0, sdir); du = fw.u; dv = fw.v; m = 1; }
+    samples.push({ u: q.u, v: q.v, w: p.w, nu: -dv / m, nv: du / m, b: p.b || 0 });
   }
 
   if (keyId === 'station') {                   // platform slabs under the rails
@@ -818,6 +833,28 @@ function trackSprite(setId, def, keyId, sdir, tint, accent) {
       var top = proj(sp2.u, sp2.v, sp2.w);
       plot(top.x, top.y - 1, paintL, true);          // and the lit top edge
     }
+  } else if (def.steel) {
+    /* Tubular steel: two rails over a painted spine, tied across every few
+       samples. A banked piece lifts its outer rail and drops its inner one,
+       which is the whole of how the bank is shown at this size. */
+    var paintS = accent || '#d8452f', paintSD = shadeHex(paintS, 0.6);
+    for (i = 0; i <= STEPS; i++) {
+      var ss = samples[i], lift = Math.sin(ss.b) * RAILSEP * 2 * (def.turn || 0);
+      var sc = proj(ss.u, ss.v, ss.w);
+      plot(sc.x, sc.y + 2, paintSD, false);
+      plot(sc.x, sc.y + 1, paintS, false);
+      if (i % 6 === 0) {
+        for (var tk = -1; tk <= 1; tk += 0.25) {
+          var tp2 = proj(ss.u + ss.nu * RAILSEP * tk, ss.v + ss.nv * RAILSEP * tk, ss.w - tk * lift);
+          plot(tp2.x, tp2.y + 1, paintSD, false);
+        }
+      }
+      for (var sd = -1; sd <= 1; sd += 2) {
+        var rp2 = proj(ss.u + ss.nu * RAILSEP * sd, ss.v + ss.nv * RAILSEP * sd, ss.w - sd * lift);
+        plot(rp2.x, rp2.y + 1, PAL.railD, false);
+        plot(rp2.x, rp2.y, sd < 0 ? PAL.railL : PAL.rail, true);
+      }
+    }
   } else {
     for (i = 0; i <= STEPS; i += 3) {          // sleepers
       var sm = samples[i];
@@ -842,6 +879,16 @@ function trackSprite(setId, def, keyId, sdir, tint, accent) {
     for (i = 0; i <= STEPS; i += 4) {
       var cp = proj(samples[i].u, samples[i].v, samples[i].w);
       plot(cp.x, cp.y, PAL.chain, false);
+    }
+  }
+  if (def.launch || def.magBrake) {
+    /* Fins down the middle: bright steel for the launch, copper for the
+       magnetic brakes, so the two read apart at a glance. */
+    var finL = def.launch ? '#f2f2ea' : '#e09050', finD = def.launch ? '#9a9a94' : '#8a4a20';
+    for (i = 2; i <= STEPS - 2; i += 3) {
+      var fp = proj(samples[i].u, samples[i].v, samples[i].w);
+      plot(fp.x, fp.y - 1, finD, false);
+      plot(fp.x, fp.y - 2, finL, false);
     }
   }
   if (def.brake) {                             // brake fins across it
@@ -1763,7 +1810,8 @@ function categoryOptions(cat) {
   var out = [];
   if (cat === 'RIDES') {
     for (var i = 0; i < RIDE_TYPES.length; i++) {
-      out.push({ id: 'ride_' + RIDE_TYPES[i].id, label: RIDE_TYPES[i].name.split(' ')[0],
+      out.push({ id: 'ride_' + RIDE_TYPES[i].id,
+                 label: RIDE_TYPES[i].label || RIDE_TYPES[i].name.split(' ')[0],
                  ride: RIDE_TYPES[i] });
     }
     return out;
@@ -1962,6 +2010,59 @@ var RIDE_TYPES = [
     }
   },
   {
+    /* No lift hill: a hydraulic launch throws the train down a straight and
+       up a tower far taller than any chain could take it. Being able to fall
+       short of the top is the point of the thing, so a train that does is
+       not a fault here. rollback:'catch' says the launch run and the station
+       hold it and send it home, where every other ride counts it a stall.
+
+       Sized at half the height of the full scale ride this is modelled on,
+       which is what the park has room for: about thirty metres over the top
+       at about twenty five metres a second. */
+    id: 'launched', name: 'HYDRAULIC LAUNCH', label: 'LAUNCH', family: 'COASTERS',
+    category: 'tracked', buildMode: 'track', needsWater: false, mount: 'above',
+    accent: '#d8452f',
+    baseCost: 2200, capacity: 20, weatherAffinity: 1,
+    maxTrains: 2, trainSpacing: 0.3, dwell: 4, queueMax: 40,
+    expectedLap: 60,
+    rollback: 'catch',
+    maxTrackZ: 36,
+    pieceSet: 'launched',
+    physics: {
+      gravity: 9.81, friction: 0.012, drag: 0.0009,
+      liftSpeed: 2.5, brakeSpeed: 5, brakeForce: 7, stallSpeed: 0.2,
+      rollbackSpeed: -0.3, rollbackRate: 2.5, stallAfter: 0.8,
+      cars: 5, carGap: 2.4, tileMetres: 3, levelMetres: 1.5,
+      frameWindow: 0.9, curveWindow: 1.5, sampleStep: 14,
+      airtimeUnder: 0.2, dropMin: 1.2, blockMargin: 1.6,
+      /* launchSpeed is what the launch run lets the train go at, launchAccel
+         how hard it gets there: about two G along the track. brakeExit is
+         what the magnetic brakes let it leave at. Both of the speeds can be
+         set per ride; these are what a new one starts with. 25.6 clears the
+         top hat with about three and a half metres a second to spare, which
+         is the thin margin a ride like this is known for: 25.4 does not. */
+      launchSpeed: 25.6, launchAccel: 19, brakeExit: 4,
+      magGain: 2, magMax: 14,
+      /* A rolled back train is held by the fins on the launch run, then let
+         back to the platform at returnSpeed. catchSpeed is how slow it has
+         to be going backwards before it counts as held. */
+      catchForce: 16, catchSpeed: 0.6, returnSpeed: 1.5
+    },
+    ratingWeights: {
+      /* One thirty metre drop and fifty eight miles an hour would swamp a
+         table weighted for the twenty metres the other coasters top out at,
+         so both count for less here. */
+      excitement: { base: 0.3, drops: 0.2, biggestDrop: 0.045, topSpeed: 0.035,
+                    airtime: 0.5, inversions: 0, variety: 0.1, length: 0.003 },
+      intensity:  { vertG: 0.55, latG: 0.5, topSpeed: 0.05,
+                    inversions: 0, drops: 0.15, capG: 7 },
+      nausea:     { latG: 0.5, turns: 0.15, inversions: 0, hardG: 0.5, hardGFrom: 3.5 },
+      penalties:  { shortUnder: 30, shortMul: 0.7,
+                    intenseOver: 10, intenseMul: 0.35,
+                    sicklyOver: 6, sicklyMul: 0.85 }
+    }
+  },
+  {
     /* The first flat ride. No track, no train, no test lap: it stands on a
        footprint and runs a cycle on a clock. Its ratings are stated here
        because there is no telemetry to derive them from — a swinging boat
@@ -2059,6 +2160,88 @@ var nextRideId = 1;
    numbers the physics wants. Moved out of a global into a table keyed by
    piece set, so a flume's channel pieces are a sibling entry rather than a
    branch in the builder. */
+
+/* ── launched track shapes ──────────────────────────────────────────────
+   Every bend a launched train takes at speed has its curvature eased in
+   from nothing and back out to nothing, so the G a rider feels builds and
+   fades rather than arriving as a kick at a joint. Each shape is worked out
+   once, as a heading integrated along a unit length of track, then
+   stretched to the squares and levels its piece fills. A stretch along
+   either axis keeps a level tangent level and an upright one upright, which
+   is all a joint between two pieces needs. */
+function easedTurn(from, turn) {
+  var n = 240, w = [], tot = 0, i;
+  for (i = 0; i < n; i++) { var e = (i + 0.5) / n; w.push(e * (1 - e)); tot += e * (1 - e); }
+  var th = from, x = 0, y = 0, pts = [{ x: 0, y: 0, k: 0 }];
+  for (i = 0; i < n; i++) {
+    var d = w[i] / tot * turn;
+    th += d / 2; x += Math.cos(th) / n; y += Math.sin(th) / n; th += d / 2;
+    pts.push({ x: x, y: y, k: Math.abs(d) * n });    // curvature per unit length
+  }
+  return pts;
+}
+function easedAt(pts, t) {
+  var f = clamp(t, 0, 1) * (pts.length - 1);
+  var i = Math.min(pts.length - 2, Math.floor(f)), r = f - i, a = pts[i], b = pts[i + 1];
+  return { x: a.x + (b.x - a.x) * r, y: a.y + (b.y - a.y) * r, k: b.k };
+}
+var EASE_QUARTER = easedTurn(0, Math.PI / 2);          // level round to upright, or a flat bend
+var EASE_PULLOUT = easedTurn(-Math.PI / 2, Math.PI / 2); // straight down round to level
+var EASE_CREST   = easedTurn(Math.PI / 2, -Math.PI);     // straight up, over, straight down
+function easedEnd(pts) { return pts[pts.length - 1]; }
+
+/* Level at the entry edge, upright over the middle of square n. A vertical
+   run stands in the middle of its square rather than on an edge, so the
+   square it is in is never in doubt. */
+function toVertical(n, dz) {
+  var end = easedEnd(EASE_QUARTER);
+  return function (t) {
+    var q = easedAt(EASE_QUARTER, t);
+    return { u: -0.5 + (n + 0.5) * q.x / end.x, v: 0, w: dz * q.y / end.y };
+  };
+}
+function fromVertical(n, dz) {
+  var end = easedEnd(EASE_PULLOUT);
+  return function (t) {
+    var q = easedAt(EASE_PULLOUT, t);
+    return { u: (n - 0.5) * q.x / end.x, v: 0, w: dz * q.y / end.y };
+  };
+}
+function upright(dz) {
+  return function (t) { return { u: 0, v: 0, w: dz * t }; };
+}
+/* Over the top the right way up: the track bends away from the riders, not
+   round them, so this is a hill turned up on end rather than half a loop. */
+function crestOver(n, rise) {
+  var end = easedEnd(EASE_CREST), top = 0;
+  for (var i = 0; i < EASE_CREST.length; i++) top = Math.max(top, EASE_CREST[i].y);
+  return function (t) {
+    var q = easedAt(EASE_CREST, t);
+    return { u: n * q.x / end.x, v: 0, w: rise * q.y / top };
+  };
+}
+/* A wide quarter turn, banked for a train going at `speed`. The bank follows
+   the curvature, so it rolls in and out with it, and at that speed the
+   riders feel the turn as weight rather than as a shove sideways. side is
+   +1 for right, -1 for left, the same sense as an ordinary curve's turn. */
+function bankedTurn(span, side, speed) {
+  var end = easedEnd(EASE_QUARTER), scale = (span - 0.5) / end.x;
+  var metres = scale * 3;                       // a tile is three metres across
+  return function (t) {
+    var q = easedAt(EASE_QUARTER, t);
+    return { u: -0.5 + q.x * scale, v: side * q.y * scale, w: 0,
+             b: Math.min(1.4, Math.atan(speed * speed * q.k / metres / 9.81)) };
+  };
+}
+/* A low, long hump: at the speeds a launched train still has once it is
+   down, a short one throws riders out of their seats rather than lifting
+   them off them. */
+function airtimeHill(n, rise) {
+  return function (t) {
+    return { u: -0.5 + n * t, v: 0, w: rise * (1 - Math.cos(2 * Math.PI * t)) / 2 };
+  };
+}
+
 var PIECE_SETS = {
   coaster: {
     station:  { name: 'STATION',       cost: 0,   tiles: 4, dz: 0,  slope: 0, chain: true },
@@ -2102,6 +2285,41 @@ var PIECE_SETS = {
     steepDn:  { name: 'STEEP DOWN', cost: 70,  tiles: 1, dz: -2, slope: -2, spine: true },
     lift:     { name: 'CHAIN LIFT', cost: 92,  tiles: 1, dz: 1,  slope: 1, chain: true, spine: true },
     brake:    { name: 'BRAKES',     cost: 64,  tiles: 1, dz: 0,  slope: 0, brake: true, spine: true }
+  },
+  /* Tubular steel. The climb and the drop are built from pieces that state
+     the slope they start on and the slope they finish on, because one of
+     them starts level and finishes upright. Upright is slope 9: far enough
+     from everything else that nothing but another vertical piece will join
+     it, so the only ways on and off a vertical run are the eased pieces. */
+  launched: {
+    station:  { name: 'STATION',      cost: 0,   tiles: 4, dz: 0, slope: 0, chain: true,
+                catchBack: true, steel: true },
+    launch:   { name: 'LAUNCH',       cost: 140, tiles: 1, dz: 0, slope: 0, launch: true, steel: true },
+    toVert:   { name: 'UP TO VERTICAL', cost: 420, tiles: 7, dz: 14, slope: 9, slopeIn: 0,
+                steel: true, curve: toVertical(7, 14) },
+    vertUp:   { name: 'VERTICAL UP',  cost: 90,  tiles: 0, dz: 2,  slope: 9,  steel: true,
+                curve: upright(2) },
+    topHat:   { name: 'TOP HAT',      cost: 260, tiles: 2, dz: 0,  slope: -9, slopeIn: 9,
+                steel: true, curve: crestOver(2, 4) },
+    vertDn:   { name: 'VERTICAL DOWN', cost: 80, tiles: 0, dz: -2, slope: -9, steel: true,
+                curve: upright(-2) },
+    fromVert: { name: 'DOWN TO LEVEL', cost: 400, tiles: 7, dz: -14, slope: 0, slopeIn: -9,
+                steel: true, curve: fromVertical(7, -14) },
+    bankL:    { name: 'BANKED LEFT',  cost: 300, tiles: 6, span: 6, dz: 0, slope: 0, turn: -1,
+                steel: true, curve: bankedTurn(6, -1, 22) },
+    bankR:    { name: 'BANKED RIGHT', cost: 300, tiles: 6, span: 6, dz: 0, slope: 0, turn: 1,
+                steel: true, curve: bankedTurn(6, 1, 22) },
+    hill:     { name: 'AIRTIME HILL', cost: 220, tiles: 10, dz: 0, slope: 0, steel: true,
+                curve: airtimeHill(10, 1) },
+    magBrake: { name: 'MAGNETIC BRAKES', cost: 90, tiles: 1, dz: 0, slope: 0, magBrake: true,
+                steel: true },
+    straight: { name: 'STRAIGHT',     cost: 40,  tiles: 1, dz: 0,  slope: 0, steel: true },
+    curveL:   { name: 'CURVE LEFT',   cost: 55,  tiles: 1, dz: 0,  slope: 0, turn: -1, steel: true },
+    curveR:   { name: 'CURVE RIGHT',  cost: 55,  tiles: 1, dz: 0,  slope: 0, turn: 1, steel: true },
+    gentleUp: { name: 'GENTLE UP',    cost: 50,  tiles: 1, dz: 1,  slope: 1, steel: true },
+    gentleDn: { name: 'GENTLE DOWN',  cost: 45,  tiles: 1, dz: -1, slope: -1, steel: true },
+    steepUp:  { name: 'STEEP UP',     cost: 70,  tiles: 1, dz: 2,  slope: 2, steel: true },
+    steepDn:  { name: 'STEEP DOWN',   cost: 60,  tiles: 1, dz: -2, slope: -2, steel: true }
   }
 };
 var PIECE_PALETTES = {
@@ -2110,7 +2328,11 @@ var PIECE_PALETTES = {
   flume:   ['straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
             'lift', 'splash'],
   invert:  ['straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
-            'steepUp', 'steepDn', 'lift', 'brake', 'loop', 'corkscrew']
+            'steepUp', 'steepDn', 'lift', 'brake', 'loop', 'corkscrew'],
+  launched: ['launch', 'toVert', 'vertUp', 'topHat', 'vertDn',
+             'fromVert', 'bankL', 'bankR', 'hill', 'magBrake',
+             'straight', 'curveL', 'curveR', 'gentleUp', 'gentleDn',
+             'steepUp', 'steepDn']
 };
 
 /* ── inversions ─────────────────────────────────────────────────────────
@@ -2254,8 +2476,11 @@ function rotUV(u, v, k) {                      // 90 degree steps in the ground 
 
 function pieceExit(def, x, y, z, d) {
   if (def.turn) {
-    var nd = (d + def.turn + 4) % 4;
-    return { x: x + DX[nd], y: y + DY[nd], z: z + def.dz, d: nd };
+    // a wide turn comes out span squares to the side and span-1 along; an
+    // ordinary curve is the span-1 case of the same thing
+    var nd = (d + def.turn + 4) % 4, span = def.span || 1;
+    return { x: x + DX[d] * (span - 1) + DX[nd] * span,
+             y: y + DY[d] * (span - 1) + DY[nd] * span, z: z + def.dz, d: nd };
   }
   return { x: x + DX[d] * def.tiles, y: y + DY[d] * def.tiles, z: z + def.dz, d: d };
 }
@@ -2305,6 +2530,9 @@ function pieceCells(def, x, y, z, d, mount) {
   return cells;
 }
 
+/* A piece's slope is the one it finishes on. The few that start on a
+   different one say so with slopeIn. */
+function slopeIn(def) { return def.slopeIn !== undefined ? def.slopeIn : (def.slope || 0); }
 function lastSlope(ride) {
   var p = ride.pieces[ride.pieces.length - 1];
   return p ? (pieceDefOf(ride, p).slope || 0) : 0;
@@ -2376,7 +2604,7 @@ function checkPiece(ride, id, n) {
   var run = plannedRun(ride, id, n);
   var first = run.steps[0].def;
   if (run.cost > park.cash) return 'NOT ENOUGH MONEY';
-  if (Math.abs((first.slope || 0) - lastSlope(ride)) > 1) return 'SLOPE CHANGES TOO FAST';
+  if (Math.abs(slopeIn(first) - lastSlope(ride)) > 1) return 'SLOPE CHANGES TOO FAST';
 
   for (var st = 0; st < run.steps.length; st++) {
     var why = checkRunStep(ride, type, run, st, id, n);
@@ -2417,7 +2645,7 @@ function checkRunStep(ride, type, run, at, id, n) {
     if (cell.z0 < t.h) return 'THAT GOES UNDERGROUND';
     if (isWater(t) && cell.z0 < t.water) return 'THAT IS UNDER THE WATER';
     if (t.path && cell.z0 < t.path.level + 1) return 'A PATH IS IN THE WAY';
-    if (cell.z1 > MAX_Z + 4) return 'TOO HIGH FOR THE PARK';
+    if (cell.z1 > (type.maxTrackZ || MAX_Z + 4)) return 'TOO HIGH FOR THE PARK';
   }
 
   /* An inversion has to be entered fast enough to get over the top of it.
@@ -3211,7 +3439,7 @@ function ridePhysics(ride) { return rideType(ride.typeId).physics; }
    call it. It returns the new velocity rather than the acceleration because
    the chain clamp is part of propulsion: split them and the two callers can
    diverge again, which is the whole reason this exists. */
-function propel(P, def, v, tz, dt) {
+function propel(P, def, v, tz, dt, L) {
   var a;
   if (P.propulsion === 'channel' && tz > -P.dropTangent) {
     // the current pushes the boat towards its channel speed along the level
@@ -3221,9 +3449,75 @@ function propel(P, def, v, tz, dt) {
     a = -P.gravity * tz - P.friction * v - P.drag * v * Math.abs(v);
   }
   if (def.brake && v > P.brakeSpeed) a -= P.brakeForce;
+  /* Launched track, given its settings in L. No other piece set has any of
+     these pieces and no other caller passes L, so nothing here changes how
+     the rides before it run.
+
+     The launch run pushes a train that is going forwards up to the launch
+     speed, but only while it is armed: a train on its way back down is not
+     launched again. Magnetic brakes pull towards their exit speed from
+     either side, which also drives a train held on them back up to it. A
+     train going backwards over the fins or into the station is held, and
+     never pushed past a standstill into going forwards again. */
+  var push = false, held = false;
+  if (L) {
+    if (def.launch && L.armed && v >= 0 && v < L.speed) { a += L.accel; push = true; }
+    if (def.magBrake && v >= 0) a += clamp((L.exit - v) * P.magGain, -P.magMax, P.magMax);
+    if (v < 0 && catches(def)) { a += P.catchForce; held = true; }
+  }
   v += a * dt;
+  if (push && v > L.speed) v = L.speed;
+  if (held && v > 0) v = 0;
   if (def.chain && v >= 0 && v < P.liftSpeed) v = P.liftSpeed;
   return v;
+}
+
+/* Where a train waits on the platform, as a distance along the circuit. */
+var START_S = 0.01;
+
+function catches(def) { return !!(def.launch || def.magBrake || def.catchBack); }
+function launchSettings(ride, m) {
+  var P = ridePhysics(ride);
+  return { speed: ride.launchSpeed || P.launchSpeed, accel: P.launchAccel,
+           exit: ride.brakeExit || P.brakeExit, armed: !m.back };
+}
+
+/* One tick of a ride that may roll back. A train that does not make it over
+   the top comes back down the way it went up, and that is an event rather
+   than a fault: the launch fins and the station hold it, and once it is
+   held it is let back to the platform at a walk. m is the test lap or a
+   working train; both carry s, v and where they are in a rollback.
+
+   Returns 'rollback' on the tick a train starts back, 'home' on the tick
+   it is on the platform again, and otherwise nothing. */
+function rollbackMove(ride, m, def, tz, dt) {
+  var P = ridePhysics(ride);
+  if (m.back === 'return') {
+    m.v = -P.returnSpeed;
+    m.s += m.v * dt;
+    if (m.s > START_S) return null;
+    m.s = START_S; m.v = 0; m.back = false;
+    return 'home';
+  }
+  m.v = propel(P, def, m.v, tz, dt, launchSettings(ride, m));
+  m.s += m.v * dt;
+  var ev = null;
+  if (m.v < 0 && !m.back) { m.back = 'roll'; ev = 'rollback'; }
+  if (m.back === 'roll' && m.v > -P.catchSpeed && catches(def)) m.back = 'return';
+  // the start of the track is the end of the line going backwards
+  if (m.s < START_S) {
+    m.s = START_S; m.v = 0;
+    if (m.back) { m.back = false; return 'home'; }
+  }
+  return ev;
+}
+
+/* A launched ride's version of the stall test. Rolling back is allowed, and
+   so is a standstill anywhere something will move the train on again: the
+   platform, the launch run, the brakes, or on the way home after a
+   rollback. Coming to rest anywhere else is a stall all the same. */
+function launchedStuck(P, m, def) {
+  return m.back !== 'return' && !catches(def) && !def.chain && Math.abs(m.v) < P.stallSpeed;
 }
 
 function buildRidePath(ride) {
@@ -3240,7 +3534,8 @@ function buildRidePath(ride) {
       pts.push({
         x: (p.x + q.u * DX[p.d] + q.v * DX[right]) * P.tileMetres,
         y: (p.y + q.u * DY[p.d] + q.v * DY[right]) * P.tileMetres,
-        z: (p.z + q.w) * P.levelMetres
+        z: (p.z + q.w) * P.levelMetres,
+        bank: q.b || 0
       });
       owner.push(i);
     }
@@ -3285,7 +3580,30 @@ function buildRidePath(ride) {
       : { x: 0, y: 0, z: 0 };
   }
 
-  return { pts: pts, owner: owner, len: len, geom: pathGeometry(ride, pts) };
+  /* Banking rolls the frame towards the inside of the turn, which is the
+     way the curvature points. Done after the transport rather than during
+     it, so the roll is applied once per sample and never carried forward. */
+  for (i = 0; i < pts.length; i++) {
+    var bk = pts[i].bank;
+    if (!bk) continue;
+    var side = v3dot(pts[i].k, pts[i].r) < 0 ? -1 : 1;
+    var cb = Math.cos(bk), sb = Math.sin(bk) * side, u0 = pts[i].u, r0 = pts[i].r;
+    pts[i].u = v3norm({ x: u0.x * cb + r0.x * sb, y: u0.y * cb + r0.y * sb, z: u0.z * cb + r0.z * sb });
+    pts[i].r = v3norm(v3cross(pts[i].t, pts[i].u));
+  }
+
+  /* The top of the circuit, and the first brakes after it: a launched ride
+     sends nobody else out until the train ahead is past both, which is the
+     block that keeps a rollback from ever meeting the train behind it. */
+  var topS = 0, topZ = -1e9, blockS;
+  for (i = 0; i < pts.length; i++) if (pts[i].z > topZ + 1e-6) { topZ = pts[i].z; topS = pts[i].s; }
+  blockS = topS;
+  for (i = 0; i < pts.length; i++) {
+    if (pts[i].s > topS && pieceDefOf(ride, ride.pieces[owner[i]]).magBrake) { blockS = pts[i].s; break; }
+  }
+
+  return { pts: pts, owner: owner, len: len, geom: pathGeometry(ride, pts),
+           topS: topS, blockS: blockS };
 }
 
 /* Shape facts that do not depend on how the train runs. */
@@ -3398,11 +3716,11 @@ function startRun(ride, mode) {
   sim.geom = sim.path.geom;
   sim.active = true;
   sim.state = 'running';
-  sim.s = 0.01; sim.v = P.liftSpeed; sim.t = 0; sim.rollT = 0;
+  sim.s = START_S; sim.v = P.liftSpeed; sim.t = 0; sim.rollT = 0; sim.back = false;
   sim.lastPiece = undefined;      // a piece index from the last ride tested is meaningless here
   sim.follow = sim.mode === 'test';
   sim.why = '';
-  sim.stats = { top: 0, maxG: -99, minG: 99, maxLat: 0, air: 0, time: 0 };
+  sim.stats = { top: 0, maxG: -99, minG: 99, maxLat: 0, air: 0, time: 0, rollbacks: 0 };
   closeWinQuiet('ratings');
   layoutUI();
 }
@@ -3426,10 +3744,14 @@ function stepSim(dt) {
   var def = pieceDefOf(ride, ride.pieces[st.owner]);
   checkSplash(ride, sim, st.owner, st, sim.v);
 
-  // the chain only pulls a train that is still going forwards, or one that
-  // cannot climb shuffles back and forth for ever instead of failing
-  sim.v = propel(P, def, sim.v, st.t.z, dt);
-  sim.s += sim.v * dt;
+  var type = rideType(ride.typeId), ev = null;
+  if (type.rollback) ev = rollbackMove(ride, sim, def, st.t.z, dt);
+  else {
+    // the chain only pulls a train that is still going forwards, or one that
+    // cannot climb shuffles back and forth for ever instead of failing
+    sim.v = propel(P, def, sim.v, st.t.z, dt);
+    sim.s += sim.v * dt;
+  }
   sim.t += dt;
 
   var g = forcesAt(ride, st, sim.v), s = sim.stats;
@@ -3440,7 +3762,21 @@ function stepSim(dt) {
   s.maxLat = Math.max(s.maxLat, Math.abs(g.lat));
   if (g.vert < P.airtimeUnder) s.air += dt;
 
-  if (sim.v < P.rollbackSpeed) sim.rollT += dt * P.rollbackRate;
+  if (ev === 'rollback') {
+    s.rollbacks++;
+    sfxBad();
+    toast('ROLLBACK! IT DID NOT MAKE THE TOP');
+  }
+  if (ev === 'home') {
+    sim.state = 'rolledback';
+    sim.why = 'ROLLED BACK';
+    layoutUI();
+    return;
+  }
+
+  if (type.rollback) {
+    if (launchedStuck(P, sim, def)) sim.rollT += dt; else sim.rollT = 0;
+  } else if (sim.v < P.rollbackSpeed) sim.rollT += dt * P.rollbackRate;
   else if (!def.chain && sim.v < P.stallSpeed) sim.rollT += dt;
   else sim.rollT = 0;
   if (sim.rollT > P.stallAfter) {
@@ -4287,9 +4623,10 @@ function operateRides(dt) {
     // and not until the last one away is clear of the station
     var tail = runs[runs.length - 1];
     if (tail && tail.s < tail.path.len * type.trainSpacing) continue;
+    if (tail && type.rollback && (tail.back || tail.s < tail.path.blockS)) continue;
 
     var P = ridePhysics(ride);
-    runs.push({ path: buildRidePath(ride), s: 0.01, v: P.liftSpeed, t: 0,
+    runs.push({ path: buildRidePath(ride), s: START_S, v: P.liftSpeed, t: 0, back: false,
                 riders: boardRiders(ride, type.capacity) });
   }
 }
@@ -4511,12 +4848,32 @@ function stepRideRun(ride, run, ahead, dt) {
   }
   var st = pts[lo];
   var def = pieceDefOf(ride, ride.pieces[run.path.owner[lo]]);
+  var type = rideType(ride.typeId);
   checkSplash(ride, run, run.path.owner[lo], st, run.v);
 
-  run.v = propel(P, def, run.v, st.t.z, dt);
+  /* Home after a rollback: everyone off at the platform, the same as at the
+     end of a lap. Held there, not moved, while there is nowhere to put them,
+     or the station would carry them straight back out again. */
+  if (run.home) {
+    var back = run.riders.length;
+    if (!unloadRiders(ride, run.riders, false)) { holdRiders(ride); return 'hold'; }
+    ride.dwell = type.dwell;
+    ride.riders = (ride.riders || 0) + back;
+    return 'off';
+  }
 
-  run.s += run.v * dt;
+  var ev = null;
+  if (type.rollback) ev = rollbackMove(ride, run, def, st.t.z, dt);
+  else {
+    run.v = propel(P, def, run.v, st.t.z, dt);
+    run.s += run.v * dt;
+  }
   run.t += dt;
+  if (ev === 'rollback') {
+    ride.rollbacks = (ride.rollbacks || 0) + 1;
+    toast(ride.name + ' ROLLED BACK');
+  }
+  if (ev === 'home') { run.home = true; return 'hold'; }
 
   /* Both trains run the same physics on the same track, so the one behind is
      the one in front shifted in time and cannot gain on it. This only catches
@@ -4529,6 +4886,10 @@ function stepRideRun(ride, run, ahead, dt) {
     if (run.s > ahead.s - gap) {
       run.s = Math.max(0, ahead.s - gap);
       run.blocked = true;
+      /* A launched ride has brakes that drive as well as slow, so a train
+         held behind another can be let down to its pace and picked up again
+         by them, rather than kept at a speed it is not moving at. */
+      if (type.rollback) run.v = Math.min(run.v, Math.max(0, ahead.v));
     }
   }
 
@@ -4536,6 +4897,7 @@ function stepRideRun(ride, run, ahead, dt) {
      shuffles about until the 120s cap while the station stands blocked, which
      reads as "nobody can ride" rather than "this hill is too steep". */
   if (run.blocked) run.rollT = 0;                 // held back, not failing
+  else if (type.rollback) run.rollT = launchedStuck(P, run, def) ? (run.rollT || 0) + dt : 0;
   else if (run.v < P.rollbackSpeed) run.rollT = (run.rollT || 0) + dt * P.rollbackRate;
   else if (!def.chain && run.v < P.stallSpeed) run.rollT = (run.rollT || 0) + dt;
   else run.rollT = 0;
@@ -5038,11 +5400,13 @@ function layoutUI() {
 
   if (build.mode === 'track' && build.ride && !isFlat(build.ride) && !isDrawn(build.ride)) {
     var bw = findWin('build');
-    if (!bw) {
-      bw = openWinRaw({ id: 'build', title: 'BUILD TRACK', w: 128, h: 138,
-                        x: 8, y: Math.max(20, uiH - 194), draw: drawBuildWinBody });
-    }
     var pal = PIECE_PALETTES[rideType(build.ride.typeId).pieceSet];
+    var px = paletteExtra(pal);
+    if (!bw) {
+      bw = openWinRaw({ id: 'build', title: 'BUILD TRACK', w: 128, h: 138 + px,
+                        x: 8, y: Math.max(20, uiH - 194 - px), draw: drawBuildWinBody });
+    }
+    bw.h = 138 + px;
     for (var pi = 0; pi < pal.length; pi++) {
       buttons.push({ id: 'piece_' + pal[pi], piece: pal[pi],
                      x: bw.x + 5 + (pi % 5) * 24, y: bw.y + 17 + ((pi / 5) | 0) * 20,
@@ -5053,17 +5417,17 @@ function layoutUI() {
                                                                     : defaultSections(pal[pi])) });
     }
     if (build.ride.complete) {
-      buttons.push({ id: 'do_test', x: bw.x + 5, y: bw.y + 71, w: 52, h: 18, label: 'TEST' });
+      buttons.push({ id: 'do_test', x: bw.x + 5, y: bw.y + 71 + px, w: 52, h: 18, label: 'TEST' });
     } else {
-      buttons.push({ id: 'do_build', x: bw.x + 5, y: bw.y + 71, w: 52, h: 18, label: 'BUILD' });
+      buttons.push({ id: 'do_build', x: bw.x + 5, y: bw.y + 71 + px, w: 52, h: 18, label: 'BUILD' });
     }
-    buttons.push({ id: 'do_undo',  x: bw.x + 61, y: bw.y + 71, w: 40, h: 18, label: 'UNDO' });
+    buttons.push({ id: 'do_undo',  x: bw.x + 61, y: bw.y + 71 + px, w: 40, h: 18, label: 'UNDO' });
     /* Hanging the doors used to be reachable only in the moment the circuit
        closed. They belong here, beside the track, where they can be placed
        or moved whenever. Lit when that door is already on the map. */
-    buttons.push({ id: 'do_wayin',  x: bw.x + 5,  y: bw.y + 93, w: 56, h: 18,
+    buttons.push({ id: 'do_wayin',  x: bw.x + 5,  y: bw.y + 93 + px, w: 56, h: 18,
                    label: 'WAY IN',  on: !!build.ride.entranceTile });
-    buttons.push({ id: 'do_wayout', x: bw.x + 65, y: bw.y + 93, w: 56, h: 18,
+    buttons.push({ id: 'do_wayout', x: bw.x + 65, y: bw.y + 93 + px, w: 56, h: 18,
                    label: 'WAY OUT', on: !!build.ride.exitTile });
   } else if (findWin('build')) {
     closeWinQuiet('build');
@@ -6021,9 +6385,9 @@ function drawSupports(g, ride, setId, p, tint) {
     var top = Math.round((rx + ry) * HH - zz * ZH + cam.y + HH);
     var foot = Math.round((rx + ry) * HH - gh * ZH + cam.y + HH + 4);
     if (foot <= top) continue;
-    g.fillStyle = tint || PAL.postD;
+    g.fillStyle = tint || (def.steel ? PAL.railD : PAL.postD);
     g.fillRect(sx - 1, top, 3, foot - top);
-    g.fillStyle = tint || PAL.post;
+    g.fillStyle = tint || (def.steel ? PAL.rail : PAL.post);
     g.fillRect(sx - 1, top, 1, foot - top);
   }
 }
@@ -6246,6 +6610,55 @@ function drawPieceIcon(g, type, bx, by, col) {
       iconLine(g, x + 1, y + 9, x + 5, y + 9);
       iconLine(g, x + 11, y + 9, x + 15, y + 9);
       break;
+    case 'launch':
+      iconLine(g, x + 1, y + 8, x + 14, y + 8);
+      for (i = 2; i <= 10; i += 4) {                // chevrons: this way, fast
+        iconLine(g, x + i, y + 2, x + i + 2, y + 4);
+        iconLine(g, x + i + 2, y + 4, x + i, y + 6);
+      }
+      break;
+    case 'toVert':
+      for (a = 0; a <= 20; a++) {
+        th = a / 20 * Math.PI / 2;
+        g.fillRect(Math.round(x + 1 + 11 * Math.sin(th)), Math.round(y + 9 - 9 * (1 - Math.cos(th))), 1, 1);
+      }
+      break;
+    case 'fromVert':
+      for (a = 0; a <= 20; a++) {
+        th = a / 20 * Math.PI / 2;
+        g.fillRect(Math.round(x + 3 + 11 * (1 - Math.cos(th))), Math.round(y + 9 * Math.sin(th)), 1, 1);
+      }
+      break;
+    case 'vertUp':
+    case 'vertDn':
+      iconLine(g, x + 8, y + 0, x + 8, y + 9);
+      var tip = type === 'vertUp' ? y + 1 : y + 8, back2 = type === 'vertUp' ? 1 : -1;
+      g.fillRect(x + 6, tip + back2, 1, 1); g.fillRect(x + 7, tip, 1, 1);
+      g.fillRect(x + 9, tip, 1, 1); g.fillRect(x + 10, tip + back2, 1, 1);
+      break;
+    case 'topHat':
+      iconLine(g, x + 4, y + 9, x + 4, y + 5);
+      iconLine(g, x + 12, y + 9, x + 12, y + 5);
+      for (a = 0; a <= 16; a++) {
+        th = a / 16 * Math.PI;
+        g.fillRect(Math.round(x + 8 - 4 * Math.cos(th)), Math.round(y + 5 - 4 * Math.sin(th)), 1, 1);
+      }
+      break;
+    case 'bankL':
+    case 'bankR':
+      drawPieceIcon(g, type === 'bankL' ? 'curveL' : 'curveR', bx, by, col);
+      // the tilt: a short slash across the bend
+      iconLine(g, x + 3, y + 7, x + 6, y + 4);
+      break;
+    case 'hill':
+      for (a = 0; a <= 14; a++) {
+        g.fillRect(x + 1 + a, Math.round(y + 8 - 6 * (1 - Math.cos(2 * Math.PI * a / 14)) / 2), 1, 1);
+      }
+      break;
+    case 'magBrake':
+      iconLine(g, x + 1, y + 4, x + 14, y + 4);
+      for (i = 3; i <= 12; i += 3) g.fillRect(x + i, y + 5, 1, 4);
+      break;
     case 'corkscrew':
       // a helix seen side on: a run of track with a twist through it
       for (var c2 = 0; c2 <= 28; c2++) {
@@ -6263,11 +6676,12 @@ function testWinBody(g, win) {
   var s2 = sim.stats, lines, col = PAL.uiText;
   if (sim.state === 'running' && sim.path) {
     var st = sampleAt(sim.s), f = forcesAt(r, st, sim.v);
-    lines = ['SPEED ' + Math.round(sim.v * MPH) + ' MPH',
+    lines = [(sim.back ? 'ROLLING BACK ' : 'SPEED ') + Math.round(Math.abs(sim.v) * MPH) + ' MPH',
              'G ' + f.vert.toFixed(1) + '  LAT ' + Math.abs(f.lat).toFixed(1),
              'AIRTIME ' + s2.air.toFixed(1) + ' S'];
+    if (sim.back) col = '#7a1f18';
   } else {
-    col = sim.state === 'stalled' ? '#7a1f18' : '#12401c';
+    col = sim.state === 'stalled' || sim.state === 'rolledback' ? '#7a1f18' : '#12401c';
     lines = [sim.why,
              'TOP ' + Math.round(s2.top * MPH) + ' MPH  ' + s2.time.toFixed(0) + ' S',
              'MAX G ' + s2.maxG.toFixed(1) + ' AIR ' + s2.air.toFixed(1) + 'S'];
@@ -6381,15 +6795,20 @@ function drawRiverWinBody(g, win) {
   }
 }
 
+/* The build window was laid out for two rows of five pieces. Every row past
+   that pushes the rest of the window down by one. */
+function paletteExtra(pal) { return Math.max(0, Math.ceil(pal.length / 5) - 2) * 20; }
+
 function drawBuildWinBody(g, win) {
   var ride = build.ride;
   if (!ride) return;
+  var px = paletteExtra(PIECE_PALETTES[rideType(ride.typeId).pieceSet]);
   var run = plannedRun(ride, build.piece, build.sections);
   var def = run.steps[0].def;
   var label = isInversion(build.piece)
     ? def.name + ' x' + run.steps.length : def.name;
-  text(g, label, win.x + 5, win.y + 59, PAL.uiText);
-  textRight(g, money(run.cost), win.x + win.w - 5, win.y + 59, PAL.uiText);
+  text(g, label, win.x + 5, win.y + 59 + px, PAL.uiText);
+  textRight(g, money(run.cost), win.x + win.w - 5, win.y + 59 + px, PAL.uiText);
 
   var why = checkPiece(ride, build.piece, build.sections);
   var line, ink = PAL.uiDim;
@@ -6398,7 +6817,7 @@ function drawBuildWinBody(g, win) {
   else { line = (ride.pieces.length - 1) + ' PIECES - NOT CLOSED YET'; }
   var lines = wrapText(line, Math.floor((win.w - 10) / ADV));
   for (var i = 0; i < Math.min(2, lines.length); i++) {
-    text(g, lines[i], win.x + 5, win.y + 115 + i * 9, ink);
+    text(g, lines[i], win.x + 5, win.y + 115 + px + i * 9, ink);
   }
 }
 
@@ -7387,7 +7806,15 @@ function migrate(save) {
        for an inversion section, and an older reader must not try. */
     save.v = 8;
   }
-  // future: if (save.v === 8) { ...upgrade to 9...; save.v = 9; }
+  if (save.v === 8) {                             // 8 -> 9: launched coasters arrived
+    /* Nothing to carry: a version 8 park has no launched coaster in it, and
+       a launched ride's own settings fall back to the type's when a save
+       leaves them out. The gate is here so a build that predates launched
+       coasters refuses a park with one in it rather than meeting a ride type
+       it cannot look up. */
+    save.v = 9;
+  }
+  // future: if (save.v === 9) { ...upgrade to 10...; save.v = 10; }
   if (save.v !== SAVE_VERSION) return null;
   if (save.world !== WORLD) return null;          // world resized under it
   if (!save.h || save.h.length !== WORLD * WORLD) return null;
